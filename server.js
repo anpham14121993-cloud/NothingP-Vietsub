@@ -11,8 +11,12 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.9.1',
+  'User-Agent': 'AISubtitlePro v3.9.5',
   Accept: 'application/json'
+};
+const SUBTITLE_BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36',
+  'Accept': 'text/plain,text/vtt,text/*,*/*;q=0.8'
 };
 
 function parseConfig(encodedConfig) {
@@ -65,7 +69,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.9.4</h2>
+<h2>Gemini AI Subtitle Pro v3.9.5</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -117,7 +121,7 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.4',
+  version: '3.9.5',
   name: 'Gemini AI Subtitle Pro',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -127,6 +131,10 @@ const defaultManifest = {
   configurable: true,
   behaviorHints: { configurable: true }
 };
+
+app.get('/healthz', (req, res) => {
+  res.status(200).json({ ok: true, version: '3.9.5', uptime: Math.round(process.uptime()) });
+});
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
 app.get('/:config/manifest.json', (req, res) => res.json(defaultManifest));
@@ -552,10 +560,14 @@ async function handleSubtitles(req, res, encodedConfig) {
 
         const releaseName = item.attributes?.release || file.file_name || 'OpenSubtitles Sub';
         const isVi = isVietnamese(lang);
+        // Do not expose the temporary OpenSubtitles download URL to Stremio.
+        // Keep the API-key-backed download behind our server. This also makes
+        // both native VI and English->Gemini use the same authenticated path.
+        const sourceUrl = `${hostUrl}/proxy-os?link=${encodeURIComponent(download.data.link)}`;
         if (isVi) {
           return {
             id: `os-vi-${item.id}`,
-            url: download.data.link,
+            url: sourceUrl,
             lang: 'vie',
             name: `🇻🇳 [Tiếng Việt] ${releaseName}`
           };
@@ -563,7 +575,7 @@ async function handleSubtitles(req, res, encodedConfig) {
 
         // IMPORTANT: The English track itself is the trigger for Gemini.
         // Stremio only requests this URL after the user selects the English subtitle.
-        const aiUrl = `${hostUrl}/translate-sub?url=${encodeURIComponent(download.data.link)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
+        const aiUrl = `${hostUrl}/translate-sub?url=${encodeURIComponent(sourceUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
         return {
           id: `os-en-${item.id}`,
           url: aiUrl,
@@ -654,16 +666,17 @@ async function handleSubtitles(req, res, encodedConfig) {
         const releaseName = subtitleName(sub, 'SubDL Sub');
         const idPart = sub.file_n_id || sub.n_id || sub.nId || sub.id || Math.random().toString(36).slice(2);
 
+        const sourceUrl = `${hostUrl}/proxy-subdl?url=${encodeURIComponent(dlUrl)}&key=${encodeURIComponent(apiKeySubDL)}`;
         if (vi && isVietnamese(lang)) {
           native.push({
             id: `subdl-vi-${idPart}`,
-            url: dlUrl,
+            url: sourceUrl,
             lang: 'vie',
             name: `🇻🇳 [Tiếng Việt] ${releaseName}`
           });
         } else if (!vi && isEnglish(lang)) {
           // Selecting the English subtitle triggers EN -> VI translation.
-          const aiUrl = `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
+          const aiUrl = `${hostUrl}/translate-sub?url=${encodeURIComponent(sourceUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
           englishOriginalSubtitles.push({
             id: `subdl-en-${idPart}`,
             url: aiUrl,
@@ -837,14 +850,45 @@ app.get('/subsource-sub/:subtitleId', async (req, res) => {
   }
 });
 
+app.get('/proxy-os', async (req, res) => {
+  const link = String(req.query.link || '');
+  if (!link) return res.status(400).send('Missing OpenSubtitles download link');
+  try {
+    const text = await fetchSubtitleText(link, SUBTITLE_BROWSER_HEADERS, 30000);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return res.send(text);
+  } catch (err) {
+    console.error('[OpenSubtitles download]', err.response?.status || '', err.code || '', err.message);
+    return res.status(502).send('Không thể tải phụ đề OpenSubtitles.');
+  }
+});
+
+app.get('/proxy-subdl', async (req, res) => {
+  const url = String(req.query.url || '');
+  const key = String(req.query.key || '');
+  if (!url) return res.status(400).send('Missing SubDL URL');
+  if (!key) return res.status(401).send('Missing SubDL API Key');
+  try {
+    const text = await fetchSubtitleText(url, {
+      ...SUBTITLE_BROWSER_HEADERS,
+      'X-API-Key': key,
+      'Authorization': `Bearer ${key}`
+    }, 30000);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return res.send(text);
+  } catch (err) {
+    console.error('[SubDL download]', err.response?.status || '', err.code || '', err.message);
+    return res.status(502).send('Không thể tải phụ đề SubDL.');
+  }
+});
+
 app.get('/proxy-sub', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).send('Missing URL');
   try {
-    const text = await fetchSubtitleText(url, {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36',
-      'Accept': 'text/plain,text/vtt,text/*,*/*;q=0.8'
-    }, 30000);
+    const text = await fetchSubtitleText(url, SUBTITLE_BROWSER_HEADERS, 30000);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.send(text);
@@ -1087,7 +1131,7 @@ app.get('/translate-sub', async (req, res) => {
     // The sample gives Gemini actual dialogue context, not only generic
     // movie metadata, so it can make better decisions about hierarchy,
     // age, intimacy and forms of address.
-    const subtitleSample = buildSubtitleContextSample(originalSrt, 14000);
+    const subtitleSample = buildSubtitleContextSample(originalSrt, 10000);
     let relationshipGuide = '';
 
     try {
@@ -1114,7 +1158,7 @@ ${relationshipGuide}
 Không có sổ tay quan hệ đáng tin cậy. Hãy suy luận thận trọng từ chính đoạn thoại và bối cảnh, không tự bịa quan hệ.
 `;
 
-    const chunks = splitSrtIntoChunks(originalSrt, 8000);
+    const chunks = splitSrtIntoChunks(originalSrt, 12000);
     const translated = [];
 
     // Three workers use the three independent Google projects to reduce wall-clock time
