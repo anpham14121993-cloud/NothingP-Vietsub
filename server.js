@@ -199,7 +199,9 @@ async function fetchSubsourceSubtitleText(subtitleId, apiKey) {
   return extractSubtitleText(Buffer.from(response.data));
 }
 
-function splitSrtIntoChunks(srt, maxChars = 7500) {
+function splitSrtIntoChunks(srt, maxChars = 12000) {
+  // 12k chars/chunk reduces the number of Gemini calls while keeping each
+  // translation request reasonably sized. Calls are globally paced below.
   const blocks = srt.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
   const chunks = [];
   let current = '';
@@ -246,24 +248,90 @@ function cleanAndRebuildSrt(srtText) {
   return entries.map((e, index) => `${index + 1}\n${e.start} --> ${e.end}\n${e.text}`).join('\n\n') || srtText;
 }
 
+let lastGeminiRequestAt = 0;
+const GEMINI_MIN_INTERVAL_MS = 4500; // ~13.3 requests/minute, below a 15 RPM quota
+
+async function waitForGeminiSlot() {
+  const now = Date.now();
+  const waitMs = Math.max(0, GEMINI_MIN_INTERVAL_MS - (now - lastGeminiRequestAt));
+  if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+  lastGeminiRequestAt = Date.now();
+}
+
 async function callAI(prompt, geminiKeys, model) {
   let lastError = 'Lỗi không xác định';
-  for (const key of geminiKeys) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-      const response = await axios.post(url, {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.2
-        }
-      }, { timeout: 60000 });
 
-      const result = response.data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('');
-      if (result) return { result, error: null };
-    } catch (err) {
-      lastError = err.response?.data?.error?.message || err.message;
+  // Try the selected model first. If it is unavailable/rate-limited,
+  // fall back to currently supported text models.
+  const modelCandidates = [...new Set([
+    model,
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-2.5-flash'
+  ].filter(Boolean))];
+
+  for (const key of geminiKeys) {
+    for (const modelName of modelCandidates) {
+      let rateLimited = false;
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await waitForGeminiSlot();
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`;
+          const response = await axios.post(url, {
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.2
+            }
+          }, {
+            timeout: 90000,
+            headers: { 'Content-Type': 'application/json' }
+          });
+
+          const result = response.data?.candidates?.[0]?.content?.parts
+            ?.map(p => p.text || '')
+            .join('')
+            .trim();
+
+          if (result) {
+            return { result, error: null, model: modelName };
+          }
+
+          lastError = `Gemini ${modelName}: không trả về nội dung`;
+          break;
+        } catch (err) {
+          const status = err.response?.status;
+          const message =
+            err.response?.data?.error?.message ||
+            err.message ||
+            `Gemini ${modelName}: lỗi không xác định`;
+
+          lastError = message;
+          console.error(`[Gemini ${modelName}]`, message);
+
+          if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(message)) {
+            rateLimited = true;
+            if (attempt < 2) {
+              const backoff = 15000 * Math.pow(2, attempt) + Math.floor(Math.random() * 2000);
+              console.warn(`[Gemini ${modelName}] Rate limit, chờ ${Math.round(backoff / 1000)}s rồi thử lại.`);
+              await new Promise(r => setTimeout(r, backoff));
+              continue;
+            }
+          }
+
+          break;
+        }
+      }
+
+      // A 429 is quota-level; immediately switching models/keys can create
+      // another burst because Gemini quotas are generally enforced per project.
+      if (rateLimited) {
+        return { result: '', error: `Gemini rate limit (429): ${lastError}` };
+      }
     }
   }
+
   return { result: '', error: lastError };
 }
 
@@ -426,8 +494,8 @@ async function handleSubtitles(req, res, encodedConfig) {
         englishSubtitlesForAI.push({
           id: `ai-os-${item.id}`,
           url: `${hostUrl}/translate-sub?url=${encodeURIComponent(download.data.link)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
-          lang: 'vie',
-          name: `🇻🇳 [GEMINI AI] Tiếng Việt\n${releaseName}`
+          lang: 'eng',
+          name: `🇬🇧 [English → Gemini AI khi chọn]\n${releaseName}`
         });
       }
     }
@@ -468,8 +536,8 @@ async function handleSubtitles(req, res, encodedConfig) {
           englishSubtitlesForAI.push({
             id: `ai-subdl-${sub.n_id || sub.id}`,
             url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
-            lang: 'vie',
-            name: `🇻🇳 [GEMINI AI] Tiếng Việt\n${releaseName}`
+            lang: 'eng',
+            name: `🇬🇧 [English → Gemini AI khi chọn]\n${releaseName}`
           });
         }
       }
@@ -580,8 +648,8 @@ async function handleSubtitles(req, res, encodedConfig) {
                   `&imdbId=${encodeURIComponent(imdbId)}` +
                   `&type=${encodeURIComponent(type)}` +
                   `&season=${season || ''}&episode=${episode || ''}`,
-                lang: 'vie',
-                name: `🇻🇳 [GEMINI AI] Tiếng Việt\n${releaseName}`
+                lang: 'eng',
+                name: `🇬🇧 [English → Gemini AI khi chọn]\n${releaseName}`
               });
             }
           }
@@ -592,7 +660,6 @@ async function handleSubtitles(req, res, encodedConfig) {
     console.error('[SubSource]', err.response?.status || '', err.response?.data || err.message);
   }
 
-  if (nativeVietSubtitles.length > 0) englishSubtitlesForAI = [];
 
   let subtitles = [...nativeVietSubtitles, ...englishSubtitlesForAI];
 
@@ -626,6 +693,37 @@ app.get('/proxy-sub', async (req, res) => {
   } catch (err) {
     res.status(502).send('Không thể tải phụ đề gốc.');
   }
+});
+
+app.get('/ai-test', async (req, res) => {
+  const config = parseConfig(req.query.config || '');
+  const geminiKeys = (config.geminiKeys && config.geminiKeys.length > 0)
+    ? config.geminiKeys
+    : [process.env.GEMINI_API_KEY].filter(Boolean);
+
+  const requestedModel = req.query.model || config.model || 'gemini-3.6-flash';
+
+  if (!geminiKeys.length) {
+    return res.json({
+      ok: false,
+      error: 'Chưa có Gemini API Key',
+      model: requestedModel
+    });
+  }
+
+  const result = await callAI(
+    'Trả lời đúng một câu: Gemini hoạt động bình thường.',
+    geminiKeys,
+    requestedModel
+  );
+
+  res.json({
+    ok: !!result.result,
+    modelRequested: requestedModel,
+    modelUsed: result.model || null,
+    result: result.result || '',
+    error: result.error || null
+  });
 });
 
 app.get('/translate-sub', async (req, res) => {
@@ -724,7 +822,7 @@ ${relationshipGuide}
 Không có sổ tay quan hệ đáng tin cậy. Hãy suy luận thận trọng từ chính đoạn thoại và bối cảnh, không tự bịa quan hệ.
 `;
 
-    const chunks = splitSrtIntoChunks(originalSrt, 7500);
+    const chunks = splitSrtIntoChunks(originalSrt, 12000);
     const translated = [];
 
     for (let i = 0; i < chunks.length; i++) {
@@ -753,15 +851,25 @@ SRT CẦN DỊCH:
 ${chunks[i]}`;
 
       const aiRes = await callAI(prompt, geminiKeys, selectedModel);
+
       if (!aiRes.result) {
-        translated.push({ index: i, text: chunks[i] });
-      } else {
-        translated.push({ index: i, text: aiRes.result.trim() });
+        console.error(`[Gemini translation chunk ${i + 1}/${chunks.length}]`, aiRes.error);
+
+        // IMPORTANT: never return untouched English as a Vietnamese subtitle.
+        // Stremio would otherwise show "Tiếng Việt" while the actual text
+        // remains English.
+        throw new Error(
+          `Gemini không dịch được đoạn ${i + 1}/${chunks.length}: ${aiRes.error || 'không có phản hồi'}`
+        );
       }
 
-      if (i < chunks.length - 1) {
-        await new Promise(r => setTimeout(r, 1500));
-      }
+      translated.push({
+        index: i,
+        text: aiRes.result.trim()
+      });
+
+      // callAI() has a global 4.5s limiter, so chunks are automatically paced
+      // below a 15 RPM quota. No extra per-chunk sleep is needed here.
     }
 
     translated.sort((a, b) => a.index - b.index);
@@ -769,7 +877,13 @@ ${chunks[i]}`;
     return res.send(finalSrt);
 
   } catch (err) {
-    return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI HỆ THỐNG]: ' + err.message);
+    console.error('[translate-sub]', err.stack || err.message || err);
+
+    return res.send(
+      '1\n00:00:01,000 --> 00:00:10,000\n' +
+      '[Gemini AI] Không thể dịch phụ đề: ' +
+      String(err.message || err).replace(/\\r?\\n/g, ' ')
+    );
   }
 });
 
@@ -781,4 +895,3 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
   console.log(`Gemini AI Subtitle Pro đang chạy tại port ${PORT}`);
 });
-
