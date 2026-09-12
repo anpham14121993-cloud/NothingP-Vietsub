@@ -9,6 +9,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
+const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
   'User-Agent': 'AISubtitlePro v2.1.0',
   Accept: 'application/json'
@@ -79,6 +80,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 <div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubDL, Subsource)</div>
 <label>OpenSubtitles API Key</label><input id="opensubtitlesKey" value="${escapeHtml(savedConfig.opensubtitlesKey)}">
 <label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
+<label>SubSource API Key</label><input id="subsourceKey" value="${escapeHtml(savedConfig.subsourceKey)}" placeholder="Nhập SubSource API Key">
 <button type="button" id="installBtn">Cài đặt trực tiếp vào Stremio</button>
 <label style="margin-top:20px">Link Addon:</label><input id="addonUrlOutput" readonly>
 <button type="button" id="copyBtn">📋 Sao chép Link Addon</button>
@@ -90,7 +92,8 @@ function getAddonUrl(){
     model:document.getElementById('modelSelect').value,
     geminiKeys:['geminiKey1','geminiKey2','geminiKey3'].map(id=>document.getElementById(id).value.trim()).filter(Boolean),
     opensubtitlesKey:document.getElementById('opensubtitlesKey').value.trim(),
-    subdlKey:document.getElementById('subdlKey').value.trim()
+    subdlKey:document.getElementById('subdlKey').value.trim(),
+    subsourceKey:document.getElementById('subsourceKey').value.trim()
   };
   return location.origin+'/'+btoa(unescape(encodeURIComponent(JSON.stringify(config))))+'/manifest.json';
 }
@@ -169,6 +172,26 @@ function extractSubtitleText(buffer) {
 
 async function fetchSubtitleText(url, headers = {}, timeout = 20000) {
   const response = await axios.get(url, { headers, responseType: 'arraybuffer', timeout, maxRedirects: 5 });
+  return extractSubtitleText(Buffer.from(response.data));
+}
+
+function getSubsourceHeaders(apiKey) {
+  return {
+    ...API_HEADERS,
+    'X-API-Key': String(apiKey || '')
+  };
+}
+
+async function fetchSubsourceSubtitleText(subtitleId, apiKey) {
+  const response = await axios.get(
+    `${SUBSOURCE_API}/subtitles/${encodeURIComponent(subtitleId)}/download`,
+    {
+      headers: getSubsourceHeaders(apiKey),
+      responseType: 'arraybuffer',
+      timeout: 30000,
+      maxRedirects: 5
+    }
+  );
   return extractSubtitleText(Buffer.from(response.data));
 }
 
@@ -338,37 +361,105 @@ async function handleSubtitles(req, res, encodedConfig) {
     }
   } catch (err) {}
 
-  // 3. Quét Subsource
+  // 3. Quét SubSource API
   try {
-    if (imdbId) {
-      const subsourceUrl = type === 'series' && season !== null && episode !== null
-        ? `https://api.subsource.dev/subtitles/${imdbId}/${season}/${episode}`
-        : `https://api.subsource.dev/subtitles/${imdbId}`;
+    if (imdbId && config.subsourceKey) {
+      let movieTitle = '';
 
-      const subsourceRes = await axios.get(subsourceUrl, {
-        headers: API_HEADERS,
-        timeout: 7000
-      }).catch(() => null);
+      try {
+        const metaRes = await axios.get(
+          `https://v3-cinemeta.strem.io/meta/${type === 'series' ? 'series' : 'movie'}/${encodeURIComponent(imdbId)}.json`,
+          { timeout: 5000 }
+        );
+        movieTitle = metaRes.data?.meta?.name || '';
+      } catch (err) {
+        console.error('[SubSource Cinemeta]', err.message);
+      }
 
-      const subsList = subsourceRes?.data?.subtitles || subsourceRes?.data || [];
-      if (Array.isArray(subsList)) {
-        for (const sub of subsList.slice(0, 6)) {
-          const lang = sub.lang || sub.language || '';
-          const dlUrl = sub.url || sub.link || (sub.fileId ? `https://api.subsource.dev/download/${sub.fileId}` : null);
-          const releaseName = sub.releaseName || sub.name || 'Subsource Sub';
+      if (movieTitle) {
+        const searchRes = await axios.get(`${SUBSOURCE_API}/movies/search`, {
+          params: {
+            searchType: 'text',
+            q: movieTitle,
+            ...(type === 'series' && season !== null ? { season } : {})
+          },
+          headers: getSubsourceHeaders(config.subsourceKey),
+          timeout: 10000
+        });
 
-          if (dlUrl) {
-            if (isVietnamese(lang)) {
+        const searchResults = Array.isArray(searchRes.data?.data)
+          ? searchRes.data.data
+          : [];
+
+        const matchedMovie = searchResults.find(movie =>
+          String(movie.imdbId || '').replace(/^tt/i, '') ===
+          String(imdbId).replace(/^tt/i, '') &&
+          (
+            type !== 'series' ||
+            season === null ||
+            movie.season == null ||
+            Number(movie.season) === season
+          )
+        );
+
+        if (matchedMovie?.movieId) {
+          const getSubsourceSubs = async language => {
+            const response = await axios.get(`${SUBSOURCE_API}/subtitles`, {
+              params: {
+                movieId: matchedMovie.movieId,
+                language,
+                page: 1,
+                limit: 100,
+                sort: 'rating'
+              },
+              headers: getSubsourceHeaders(config.subsourceKey),
+              timeout: 10000
+            });
+            return Array.isArray(response.data?.data) ? response.data.data : [];
+          };
+
+          let vietnameseSubs = await getSubsourceSubs('vi').catch(() => []);
+          if (!vietnameseSubs.length) {
+            vietnameseSubs = await getSubsourceSubs('vie').catch(() => []);
+          }
+          vietnameseSubs = vietnameseSubs.filter(sub => isVietnamese(sub.language));
+
+          let englishSubs = [];
+          if (!vietnameseSubs.length) {
+            englishSubs = (await getSubsourceSubs('english').catch(() => []))
+              .filter(sub => isEnglish(sub.language));
+          }
+
+          const selectedSubs = (vietnameseSubs.length ? vietnameseSubs : englishSubs).slice(0, 6);
+
+          for (const sub of selectedSubs) {
+            if (!sub.subtitleId) continue;
+
+            const releaseName = Array.isArray(sub.releaseInfo)
+              ? sub.releaseInfo.join(' ')
+              : (sub.releaseInfo || sub.productionType || 'SubSource');
+
+            const downloadUrl =
+              `${hostUrl}/subsource-sub/${encodeURIComponent(sub.subtitleId)}` +
+              `?key=${encodeURIComponent(config.subsourceKey)}`;
+
+            if (isVietnamese(sub.language)) {
               nativeVietSubtitles.push({
-                id: `subsource-vi-${sub.id || Math.random()}`,
-                url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(dlUrl)}`,
+                id: `subsource-vi-${sub.subtitleId}`,
+                url: downloadUrl,
                 lang: 'vie',
                 name: `🇻🇳 [Tiếng Việt] ${releaseName}`
               });
-            } else if (isEnglish(lang)) {
+            } else if (isEnglish(sub.language)) {
               englishSubtitlesForAI.push({
-                id: `ai-subsource-${sub.id || Math.random()}`,
-                url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
+                id: `ai-subsource-${sub.subtitleId}`,
+                url:
+                  `${hostUrl}/translate-sub?url=${encodeURIComponent(downloadUrl)}` +
+                  `&model=${encodeURIComponent(modelToUse)}` +
+                  `&config=${encodeURIComponent(encodedConfig || '')}` +
+                  `&imdbId=${encodeURIComponent(imdbId)}` +
+                  `&type=${encodeURIComponent(type)}` +
+                  `&season=${season || ''}&episode=${episode || ''}`,
                 lang: 'eng',
                 name: `[GEMINI AI] Tiếng Anh\n${releaseName}`
               });
@@ -377,7 +468,11 @@ async function handleSubtitles(req, res, encodedConfig) {
         }
       }
     }
-  } catch (err) {}
+  } catch (err) {
+    console.error('[SubSource]', err.response?.status || '', err.response?.data || err.message);
+  }
+
+  if (nativeVietSubtitles.length > 0) englishSubtitlesForAI = [];
 
   let subtitles = [...nativeVietSubtitles, ...englishSubtitlesForAI];
 
@@ -392,6 +487,23 @@ async function handleSubtitles(req, res, encodedConfig) {
 
   res.json({ subtitles });
 }
+
+app.get('/subsource-sub/:subtitleId', async (req, res) => {
+  const { subtitleId } = req.params;
+  const apiKey = String(req.query.key || '');
+
+  if (!subtitleId) return res.status(400).send('Missing subtitle ID');
+  if (!apiKey) return res.status(401).send('Missing SubSource API Key');
+
+  try {
+    const text = await fetchSubsourceSubtitleText(subtitleId, apiKey);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.send(text);
+  } catch (err) {
+    console.error('[SubSource download]', err.response?.status || '', err.message);
+    res.status(502).send('Không thể tải phụ đề từ SubSource.');
+  }
+});
 
 app.get('/proxy-sub', async (req, res) => {
   const { url } = req.query;
@@ -425,7 +537,18 @@ app.get('/translate-sub', async (req, res) => {
 
     let originalSrt;
     try {
-      originalSrt = await fetchSubtitleText(url);
+      const subsourceMatch = String(url).match(
+        /^https?:\/\/[^/]+\/subsource-sub\/([^?]+)\?key=([^&]+)/
+      );
+
+      if (subsourceMatch) {
+        originalSrt = await fetchSubsourceSubtitleText(
+          decodeURIComponent(subsourceMatch[1]),
+          decodeURIComponent(subsourceMatch[2])
+        );
+      } else {
+        originalSrt = await fetchSubtitleText(url);
+      }
     } catch (err) {
       return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI]: Không tải được file phụ đề tiếng Anh.');
     }
