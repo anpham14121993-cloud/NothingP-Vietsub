@@ -141,21 +141,21 @@ function renderConfigPage(req, res, savedConfig) {
 
 const defaultManifest = {
     id: 'org.ai.subtitle.pro',
-    version: '1.5.1',
+    version: '1.5.2',
     name: 'AI Subtitle Pro',
     description: 'Addon phụ đề tự động tiếng Việt (Gemini + ChatGPT + Đa nguồn Sub)',
     types: ['movie', 'series'],
     catalogs: [],
     resources: ['subtitles'],
     idPrefixes: ['tt'],
-    configurable: true // <--- Giúp hiển thị nút Cấu hình lại trong Stremio
+    configurable: true
 };
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
 app.get('/:config/manifest.json', (req, res) => res.json(defaultManifest));
 
 const API_HEADERS = {
-    'User-Agent': 'AISubtitlePro v1.5.1',
+    'User-Agent': 'AISubtitlePro v1.5.2',
     'Accept': 'application/json'
 };
 
@@ -325,7 +325,7 @@ app.get('/proxy-sub', async (req, res) => {
     if (!url) return res.status(400).send('Missing URL');
 
     try {
-        const headers = { 'User-Agent': 'AISubtitlePro v1.5.1' };
+        const headers = { 'User-Agent': 'AISubtitlePro v1.5.2' };
         if (provider === 'subsource' && key) headers['Authorization'] = `Bearer ${key}`;
 
         const response = await axios.get(url, { headers, responseType: 'text', timeout: 8000 });
@@ -352,7 +352,7 @@ app.get('/translate-sub', async (req, res) => {
     let originalSrt = "";
     try {
         const subResponse = await axios.get(url, { 
-            headers: { 'User-Agent': 'AISubtitlePro v1.5.1', 'Accept': 'text/plain, */*' }, 
+            headers: { 'User-Agent': 'AISubtitlePro v1.5.2', 'Accept': 'text/plain, */*' }, 
             responseType: 'text', 
             timeout: 8000 
         });
@@ -393,7 +393,8 @@ app.get('/translate-sub', async (req, res) => {
             if (success) break;
             for (const m of uniqueModels) {
                 try {
-                    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${key}`;
+                    // Đã đổi từ v1beta sang v1 chuẩn
+                    const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/${m}:generateContent?key=${key}`;
                     const aiResponse = await axios.post(geminiUrl, {
                         contents: [{ parts: [{ text: prompt }] }]
                     }, { timeout: 35000 });
@@ -426,4 +427,3 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
-
