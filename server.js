@@ -11,7 +11,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.6.0',
+  'User-Agent': 'AISubtitlePro v3.9.1',
   Accept: 'application/json'
 };
 
@@ -65,11 +65,13 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.7</h2>
+<h2>Gemini AI Subtitle Pro v3.9.2</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
-<option value="gemini-3.6-flash" ${savedConfig.model === 'gemini-3.6-flash' || !savedConfig.model ? 'selected' : ''}>Gemini 3.6 Flash - Low thinking (Khuyên dùng)</option>
+<option value="gemini-3.8-flash" ${savedConfig.model === 'gemini-3.8-flash' || !savedConfig.model ? 'selected' : ''}>Gemini 3.8 Flash - Low thinking (Khuyên dùng)</option>
+<option value="gemini-3.7-flash" ${savedConfig.model === 'gemini-3.7-flash' ? 'selected' : ''}>Gemini 3.7 Flash - Low thinking</option>
+<option value="gemini-3.6-flash" ${savedConfig.model === 'gemini-3.6-flash' ? 'selected' : ''}>Gemini 3.6 Flash - Low thinking</option>
 <option value="gemini-3.5-flash-lite" ${savedConfig.model === 'gemini-3.5-flash-lite' ? 'selected' : ''}>Gemini 3.5 Flash-Lite</option>
 <option value="gemini-2.5-flash" ${savedConfig.model === 'gemini-2.5-flash' ? 'selected' : ''}>Gemini 2.5 Flash (Dự phòng)</option>
 </select>
@@ -77,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 <label>Gemini API Key 1</label><input id="geminiKey1" value="${escapeHtml(geminiKeys[0])}" placeholder="AIzaSy...">
 <label>Gemini API Key 2</label><input id="geminiKey2" value="${escapeHtml(geminiKeys[1])}">
 <label>Gemini API Key 3</label><input id="geminiKey3" value="${escapeHtml(geminiKeys[2])}">
-<div style="font-size:12px;color:#aaa;margin-top:8px;line-height:1.45">v3.5: 3 Key thuộc 3 Google Project khác nhau sẽ chạy 3 worker dịch song song. Mỗi Project có limiter riêng.</div>
+<div style="font-size:12px;color:#aaa;margin-top:8px;line-height:1.45">v3.9.1: 3 Key thuộc 3 Google Project khác nhau sẽ chạy 3 worker dịch song song. Mỗi Project có limiter riêng.</div>
 <div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubDL, Subsource)</div>
 <label>OpenSubtitles API Key</label><input id="opensubtitlesKey" value="${escapeHtml(savedConfig.opensubtitlesKey)}">
 <label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
@@ -115,7 +117,7 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.7.0',
+  version: '3.9.0',
   name: 'Gemini AI Subtitle Pro',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -289,10 +291,11 @@ async function callAI(prompt, geminiKeys, model) {
   // Try the selected model first. If it is unavailable/rate-limited,
   // fall back to currently supported text models.
   const modelCandidates = [...new Set([
-    model,
+    model || 'gemini-3.8-flash',
     'gemini-3.8-flash',
     'gemini-3.7-flash',
     'gemini-3.6-flash',
+    'gemini-3.5-flash-lite',
     'gemini-2.5-flash'
   ].filter(Boolean))];
 
@@ -306,12 +309,13 @@ async function callAI(prompt, geminiKeys, model) {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`;
             return axios.post(url, {
               contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: {
-                temperature: 0.2,
-                ...(String(modelName).startsWith('gemini-3.') ? {
-                  thinkingConfig: { thinkingLevel: 'low' }
-                } : {})
-              }
+              generationConfig: String(modelName).startsWith('gemini-3.')
+                ? {
+                    thinkingConfig: { thinkingLevel: 'low' }
+                  }
+                : {
+                    temperature: 0.2
+                  }
             }, {
               timeout: 90000,
               headers: { 'Content-Type': 'application/json' }
@@ -487,7 +491,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   const season = parts[1] ? parseInt(parts[1], 10) : null;
   const episode = parts[2] ? parseInt(parts[2], 10) : null;
   const hostUrl = makeHostUrl(req);
-  const modelToUse = config.model || 'gemini-3.6-flash';
+  const modelToUse = config.model || 'gemini-3.8-flash';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -558,7 +562,7 @@ async function handleSubtitles(req, res, encodedConfig) {
           url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(download.data.link)}`,
           lang: 'eng',
           name: `🇺🇸 [English] ${releaseName}`
-        , aiUrl: `${hostUrl}/translate-sub?url=${encodeURIComponent(download.data.link)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`
+        , aiUrl: `${hostUrl}/translate-sub?url=${encodeURIComponent(download.data.link)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`
         };
       }));
 
@@ -666,7 +670,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             name: `🇻🇳 [Tiếng Việt] ${releaseName}`
           });
         } else if (!vi && isEnglish(lang)) {
-          const aiUrl = `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`;
+          const aiUrl = `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
           englishOriginalSubtitles.push({
             id: `subdl-en-${idPart}`,
             url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(dlUrl)}`,
@@ -786,7 +790,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             `&config=${encodeURIComponent(encodedConfig || '')}` +
             `&imdbId=${encodeURIComponent(imdbId)}` +
             `&type=${encodeURIComponent(type)}` +
-            `&season=${season || ''}&episode=${episode || ''}`;
+            `&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
           englishOriginalSubtitles.push({
             id: `subsource-en-${sub.subtitleId}`,
             url: downloadUrl,
@@ -834,16 +838,6 @@ async function handleSubtitles(req, res, encodedConfig) {
   // IMPORTANT: keep the original English tracks. AI tracks are separate Vietnamese tracks.
   let subtitles = [...nativeVietSubtitles, ...englishOriginalSubtitles, ...englishSubtitlesForAI];
 
-  // Prewarm the first AI subtitle in the background. Stremio gets the
-  // subtitle list immediately, while Gemini translation starts before the
-  // user taps the track. This is the main protection against client timeout.
-  const firstAI = subtitles.find(s => s.ai && s.url);
-  if (firstAI) {
-    axios.get(firstAI.url, { timeout: 120000 }).catch(err => {
-      console.warn('[AI prewarm]', err.message);
-    });
-  }
-
   res.json({ subtitles });
 }
 
@@ -881,7 +875,7 @@ app.get('/ai-test-all', async (req, res) => {
   const geminiKeys = (config.geminiKeys && config.geminiKeys.length > 0)
     ? config.geminiKeys
     : [process.env.GEMINI_API_KEY].filter(Boolean);
-  const requestedModel = req.query.model || config.model || 'gemini-3.6-flash';
+  const requestedModel = req.query.model || config.model || 'gemini-3.8-flash';
 
   if (!geminiKeys.length) {
     return res.json({ ok: false, error: 'Chưa có Gemini API Key', keys: [] });
@@ -911,7 +905,7 @@ app.get('/ai-test', async (req, res) => {
     ? config.geminiKeys
     : [process.env.GEMINI_API_KEY].filter(Boolean);
 
-  const requestedModel = req.query.model || config.model || 'gemini-3.6-flash';
+  const requestedModel = req.query.model || config.model || 'gemini-3.8-flash';
 
   if (!geminiKeys.length) {
     return res.json({
@@ -968,10 +962,42 @@ function setCachedTranslation(key, srt) {
 }
 
 app.get('/translate-sub', async (req, res) => {
-  const { url, model, config: configQuery, imdbId, type, season, episode } = req.query;
+  const { url, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
 
+  // Render's edge can return 502 if a long Gemini request stays completely
+  // idle while the server is waiting for Gemini. Send a tiny whitespace
+  // heartbeat every 10s during the long-running translation job. The bytes
+  // are harmless to SRT (they are outside any subtitle block).
+  let keepAliveTimer = null;
+  const startKeepAlive = () => {
+    if (keepAliveTimer) return;
+    try { res.flushHeaders(); } catch {}
+    keepAliveTimer = setInterval(() => {
+      try {
+        if (!res.writableEnded && !res.destroyed) res.write('\n');
+      } catch {}
+    }, 10000);
+  };
+  const stopKeepAlive = () => {
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+  };
+
   if (!url) return res.send('1\n00:00:01,000 --> 00:00:05,000\n[LỖI]: Thiếu đường dẫn file phụ đề.');
+
+  // Gemini translation is intentionally click-to-translate only:
+  // every AI subtitle exposed by this addon is English source -> Vietnamese.
+  // /subtitles never calls this endpoint, so no Gemini request is made until
+  // Stremio actually opens the AI subtitle URL.
+  if (source && String(source).toLowerCase() !== 'en') {
+    return res.send('1\n00:00:01,000 --> 00:00:06,000\n[Gemini AI] Chỉ hỗ trợ dịch từ phụ đề tiếng Anh.');
+  }
+  if (target && String(target).toLowerCase() !== 'vi') {
+    return res.send('1\n00:00:01,000 --> 00:00:06,000\n[Gemini AI] Đích dịch phải là tiếng Việt.');
+  }
 
   try {
     const config = parseConfig(configQuery);
@@ -983,7 +1009,7 @@ app.get('/translate-sub', async (req, res) => {
       return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI]: Chưa có Gemini API Key.');
     }
 
-    const selectedModel = model || config.model || 'gemini-3.6-flash';
+    const selectedModel = model || config.model || 'gemini-3.8-flash';
     const cacheKey = makeTranslationCacheKey({ url, model: selectedModel, imdbId, type, season, episode });
 
     const cachedSrt = getCachedTranslation(cacheKey);
@@ -997,11 +1023,14 @@ app.get('/translate-sub', async (req, res) => {
     // of starting another 3-project Gemini translation.
     const existingJob = translationInFlight.get(cacheKey);
     if (existingJob) {
+      startKeepAlive();
       try {
         const readySrt = await existingJob;
+        stopKeepAlive();
         res.setHeader('Cache-Control', 'public, max-age=21600');
         return res.send(readySrt);
       } catch (err) {
+        stopKeepAlive();
         return res.send(
           '1\n00:00:01,000 --> 00:00:10,000\n[Gemini AI] Không thể dịch phụ đề: ' +
           String(err.message || err).replace(/\\r?\\n/g, ' ')
@@ -1016,6 +1045,7 @@ app.get('/translate-sub', async (req, res) => {
       rejectJob = reject;
     });
     translationInFlight.set(cacheKey, currentJob);
+    startKeepAlive();
 
     let originalSrt;
     try {
@@ -1163,6 +1193,7 @@ ${chunks[i]}`;
     const finalSrt = cleanAndRebuildSrt(translated.map(t => t.text).join('\n\n'));
     setCachedTranslation(cacheKey, finalSrt);
     releaseJob(finalSrt);
+    stopKeepAlive();
     res.setHeader('Cache-Control', 'public, max-age=21600');
     return res.send(finalSrt);
 
@@ -1170,6 +1201,7 @@ ${chunks[i]}`;
     if (rejectJob) rejectJob(err);
 
     console.error('[translate-sub]', err.stack || err.message || err);
+    stopKeepAlive();
 
     return res.send(
       '1\n00:00:01,000 --> 00:00:10,000\n' +
@@ -1186,7 +1218,13 @@ app.get('/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, r
 app.get('/:config/subtitles/:type/:id.json', (req, res) => handleSubtitles(req, res, req.params.config));
 app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, res, req.params.config));
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Gemini AI Subtitle Pro đang chạy tại port ${PORT}`);
 });
 
+// Render's edge proxy can return 502 when a Node request/connection is
+// closed or left idle while a long Gemini translation is still running.
+// Keep the Node side of the connection open long enough for long subtitle jobs.
+server.keepAliveTimeout = 120000;
+server.headersTimeout = 125000;
+server.requestTimeout = 0;
