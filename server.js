@@ -144,12 +144,21 @@ function languageCode(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+// BỘ LỌC NGÔN NGỮ TIẾNG VIỆT ĐÃ ĐƯỢC MỞ RỘNG (Bắt trọn vi, vie, vnm, vn, vi-VN, Vietnamese...)
 function isVietnamese(value) {
-  return ['vi', 'vie', 'vietnamese', 'viet'].includes(languageCode(value));
+  const code = languageCode(value);
+  return code === 'vi' || 
+         code === 'vie' || 
+         code === 'vnm' || 
+         code === 'vn' || 
+         code.startsWith('vi') || 
+         code.includes('viet') || 
+         code.includes('tiếng việt');
 }
 
 function isEnglish(value) {
-  return ['en', 'eng', 'english'].includes(languageCode(value));
+  const code = languageCode(value);
+  return code === 'en' || code === 'eng' || code === 'english' || code.includes('eng');
 }
 
 function subtitleName(sub, fallback) {
@@ -505,10 +514,10 @@ async function handleSubtitles(req, res, encodedConfig) {
 
   let subtitles = [];
   if (nativeVietSubtitles.length > 0) {
-    // Nếu đã có phụ đề tiếng Việt gốc -> Chỉ trả về sub Việt gốc, tự động ẩn toàn bộ tùy chọn AI dịch
+    // Ưu tiên tuyệt đối sub Việt gốc, ẩn toàn bộ tùy chọn AI dịch
     subtitles = nativeVietSubtitles;
   } else {
-    // Nếu chưa có sub Việt -> Mới hiển thị các tùy chọn dịch AI từ sub tiếng Anh
+    // Chỉ khi không tìm thấy sub Việt gốc mới hiển thị tùy chọn dịch AI từ sub Anh
     subtitles = englishSubtitles;
   }
 
@@ -656,7 +665,10 @@ app.get('/translate-sub', async (req, res) => {
 
     const chunks = splitSrtIntoChunks(originalSrt, 8000);
 
-    const translated = await Promise.all(chunks.map(async (chunk, index) => {
+    // DỊCH TUẦN TỰ (SEQUENTIAL) KÈM DELAY 1.5 GIÂY ĐỂ TRÁNH LỖI 429 QUOTA EXCEEDED
+    const translated = [];
+    for (let index = 0; index < chunks.length; index++) {
+      const chunk = chunks[index];
       const prompt =
         `Bạn là dịch giả phụ đề chuyên nghiệp. Dịch SRT sang tiếng Việt tự nhiên, điện ảnh.${pronounGuide}\n\n` +
         `BẮT BUỘC: giữ nguyên timestamp, không gộp, không bỏ mục. ` +
@@ -670,8 +682,12 @@ app.get('/translate-sub', async (req, res) => {
         throw new Error(`Lỗi phần ${index + 1}/${chunks.length}: ${result.lastError}`);
       }
 
-      return { index, text: result.result.trim() };
-    }));
+      translated.push({ index, text: result.result.trim() });
+
+      if (index < chunks.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+    }
 
     translated.sort((a, b) => a.index - b.index);
     const finalSrt = cleanAndRebuildSrt(
