@@ -112,11 +112,11 @@ function renderConfigPage(req, res, savedConfig) {
                 };
                 const encoded = btoa(JSON.stringify(config));
                 const currentUrl = window.location.origin;
-                return `${currentUrl}/${encoded}/manifest.json`;
+                return currentUrl + '/' + encoded + '/manifest.json';
             }
             document.getElementById('installBtn').addEventListener('click', () => {
                 const addonUrl = getAddonUrl();
-                window.location.href = `stremio://${addonUrl.replace(/^https?:\/\//, '')}`;
+                window.location.href = 'stremio://' + addonUrl.replace(/^https?:\\/\\//, '');
             });
             document.getElementById('copyBtn').addEventListener('click', () => {
                 const addonUrl = getAddonUrl();
@@ -566,4 +566,3 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
   console.log(`✅ Server is running on port ${PORT} - Full Subtitle Providers Fixed`);
 });
-
