@@ -470,7 +470,15 @@ async function handleSubtitles(req, res, encodedConfig) {
       timeout: 7000
     });
 
-    for (const item of (osRes.data?.data || []).slice(0, 6)) {
+    // IMPORTANT: filter by language BEFORE limiting results.
+    // OpenSubtitles can return non-Vietnamese tracks first even when the
+    // request asks for vi/en; slicing first could hide a valid Vietnamese sub.
+    const osItems = osRes.data?.data || [];
+    const osVi = osItems.filter(item => isVietnamese(item.attributes?.language || ''));
+    const osEn = osItems.filter(item => isEnglish(item.attributes?.language || ''));
+    const osSelected = [...osVi.slice(0, 6), ...osEn.slice(0, 6)];
+
+    for (const item of osSelected) {
       const file = item.attributes?.files?.[0];
       const lang = item.attributes?.language || '';
       if (!file?.file_id) continue;
@@ -519,7 +527,14 @@ async function handleSubtitles(req, res, encodedConfig) {
         timeout: 7000
       });
 
-      for (const sub of (subdlRes.data?.subtitles || []).slice(0, 6)) {
+      // IMPORTANT: filter by language BEFORE limiting results for the same
+      // reason as OpenSubtitles above.
+      const subdlItems = subdlRes.data?.subtitles || [];
+      const subdlVi = subdlItems.filter(sub => isVietnamese(sub.language || ''));
+      const subdlEn = subdlItems.filter(sub => isEnglish(sub.language || ''));
+      const subdlSelected = [...subdlVi.slice(0, 6), ...subdlEn.slice(0, 6)];
+
+      for (const sub of subdlSelected) {
         const lang = sub.language || '';
         if (!sub.url) continue;
         const dlUrl = sub.url.startsWith('http') ? sub.url : `https://dl.subdl.com${sub.url}`;
@@ -726,6 +741,36 @@ app.get('/ai-test', async (req, res) => {
   });
 });
 
+// In-memory translation cache. This is especially useful on Android/Android TV,
+// where a slow subtitle URL may be requested more than once. Completed results
+// are reused immediately on later subtitle requests.
+const translatedSubtitleCache = new Map();
+const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const TRANSLATION_CACHE_MAX = 40;
+
+function makeTranslationCacheKey({ url, model, imdbId, type, season, episode }) {
+  return [url, model || '', imdbId || '', type || '', season || '', episode || ''].join('|');
+}
+
+function getCachedTranslation(key) {
+  const hit = translatedSubtitleCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.createdAt > TRANSLATION_CACHE_TTL_MS) {
+    translatedSubtitleCache.delete(key);
+    return null;
+  }
+  return hit.srt;
+}
+
+function setCachedTranslation(key, srt) {
+  translatedSubtitleCache.set(key, { createdAt: Date.now(), srt });
+  while (translatedSubtitleCache.size > TRANSLATION_CACHE_MAX) {
+    const oldestKey = translatedSubtitleCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    translatedSubtitleCache.delete(oldestKey);
+  }
+}
+
 app.get('/translate-sub', async (req, res) => {
   const { url, model, config: configQuery, imdbId, type, season, episode } = req.query;
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -743,6 +788,13 @@ app.get('/translate-sub', async (req, res) => {
     }
 
     const selectedModel = model || config.model || 'gemini-3.6-flash';
+    const cacheKey = makeTranslationCacheKey({ url, model: selectedModel, imdbId, type, season, episode });
+
+    const cachedSrt = getCachedTranslation(cacheKey);
+    if (cachedSrt) {
+      res.setHeader('Cache-Control', 'public, max-age=21600');
+      return res.send(cachedSrt);
+    }
 
     let originalSrt;
     try {
@@ -825,7 +877,11 @@ Không có sổ tay quan hệ đáng tin cậy. Hãy suy luận thận trọng t
     const chunks = splitSrtIntoChunks(originalSrt, 12000);
     const translated = [];
 
-    for (let i = 0; i < chunks.length; i++) {
+    // Two workers are enough to reduce wall-clock time when Gemini responses
+    // themselves take longer than the 4.5s global request-start interval.
+    // The limiter in callAI() still guarantees that Gemini request starts are
+    // spaced at least 4.5s apart, so we do not create a >15 RPM burst.
+    const translateChunk = async (i) => {
       const prompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
 MỤC TIÊU:
@@ -867,13 +923,25 @@ ${chunks[i]}`;
         index: i,
         text: aiRes.result.trim()
       });
+    };
 
-      // callAI() has a global 4.5s limiter, so chunks are automatically paced
-      // below a 15 RPM quota. No extra per-chunk sleep is needed here.
-    }
+    // Keep at most two translation requests in flight. callAI()'s global
+    // limiter controls their start rate; this only prevents one slow request
+    // from forcing every later chunk to wait for its completion.
+    let nextChunkIndex = 0;
+    const worker = async () => {
+      while (true) {
+        const i = nextChunkIndex++;
+        if (i >= chunks.length) return;
+        await translateChunk(i);
+      }
+    };
+    await Promise.all([worker(), worker()]);
 
     translated.sort((a, b) => a.index - b.index);
     const finalSrt = cleanAndRebuildSrt(translated.map(t => t.text).join('\n\n'));
+    setCachedTranslation(cacheKey, finalSrt);
+    res.setHeader('Cache-Control', 'public, max-age=21600');
     return res.send(finalSrt);
 
   } catch (err) {
