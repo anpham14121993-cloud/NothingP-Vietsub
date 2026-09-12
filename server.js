@@ -332,7 +332,7 @@ app.get('/proxy-sub', async (req, res) => {
   }
 });
 
-function splitSrtIntoChunks(srt, maxChars = 12000) {
+function splitSrtIntoChunks(srt, maxChars = 8000) {
   const blocks = srt.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
   const chunks = [];
   let current = '';
@@ -345,6 +345,42 @@ function splitSrtIntoChunks(srt, maxChars = 12000) {
   }
   if (current) chunks.push(current);
   return chunks.length ? chunks : [srt];
+}
+
+// Hàm chuẩn hóa, làm sạch và đánh số lại SRT để tránh lỗi chồng chéo phụ đề
+function cleanAndRebuildSrt(srtText) {
+  const cleaned = srtText.replace(/\r/g, '').trim();
+  const blockStrs = cleaned.split(/\n\s*\n/).filter(Boolean);
+  const entries = [];
+
+  for (const blockStr of blockStrs) {
+    const lines = blockStr.split('\n');
+    let timeLineIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes('-->')) {
+        timeLineIdx = i;
+        break;
+      }
+    }
+    if (timeLineIdx !== -1) {
+      const timeLine = lines[timeLineIdx];
+      const [start, end] = timeLine.split('-->').map(s => s.trim());
+      const textLines = lines.slice(timeLineIdx + 1);
+      if (start && end && textLines.length > 0) {
+        entries.push({
+          start: start,
+          end: end,
+          text: textLines.join('\n')
+        });
+      }
+    }
+  }
+
+  let resultSrt = '';
+  for (let i = 0; i < entries.length; i++) {
+    resultSrt += `${i + 1}\n${entries[i].start} --> ${entries[i].end}\n${entries[i].text}\n\n`;
+  }
+  return resultSrt.trim() || srtText;
 }
 
 app.get('/translate-sub', async (req, res) => {
@@ -370,12 +406,11 @@ app.get('/translate-sub', async (req, res) => {
       return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI TẢI FILE ĐỂ DỊCH]: ' + e.message);
     }
 
-    const chunks = splitSrtIntoChunks(originalSrt, 12000);
+    const chunks = splitSrtIntoChunks(originalSrt, 8000);
     const models = [...new Set([selectedModel, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'].filter(m => typeof m === 'string' && m.startsWith('gemini-')))];
 
-    // Dịch song song tất cả các chunk cùng một lúc bằng Promise.all
     const translationPromises = chunks.map(async (chunk, i) => {
-      const prompt = 'Bạn là dịch giả phụ đề chuyên nghiệp. Dịch nội dung SRT sau sang tiếng Việt tự nhiên. BẮT BUỘC giữ nguyên tuyệt đối số thứ tự, timestamp và cấu trúc từng mục; không gộp, không bỏ, không thêm mục. Chỉ trả về SRT đã dịch, không giải thích.\n\n' + chunk;
+      const prompt = 'Bạn là dịch giả phụ đề chuyên nghiệp. Dịch nội dung SRT sau sang tiếng Việt tự nhiên. BẮT BUỘC giữ nguyên tuyệt đối cấu trúc timestamp, không gộp, không bỏ mục. Chỉ trả về SRT đã dịch, không giải thích.\n\n' + chunk;
       let result = '';
       let lastError = 'Chưa rõ nguyên nhân';
 
@@ -425,7 +460,10 @@ app.get('/translate-sub', async (req, res) => {
     const translatedResults = await Promise.all(translationPromises);
     translatedResults.sort((a, b) => a.index - b.index);
     
-    return res.send(translatedResults.map(r => r.text).join('\n\n'));
+    const combinedSrt = translatedResults.map(r => r.text).join('\n\n');
+    const finalSrt = cleanAndRebuildSrt(combinedSrt);
+
+    return res.send(finalSrt);
   } catch (e) {
     return res.send('1\n00:00:01,000 --> 00:00:10,000\n[LỖI AI DỊCH]: ' + e.message);
   }
