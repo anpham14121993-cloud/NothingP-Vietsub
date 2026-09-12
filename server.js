@@ -8,7 +8,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Helper phân tích config
+// Giải mã cấu hình base64 từ Stremio
 function parseConfig(encodedConfig) {
   if (!encodedConfig) return {};
   try {
@@ -36,12 +36,11 @@ function getConfig(encodedConfig) {
   return { ...DEFAULT_CONFIG, ...userConfig };
 }
 
-// Manifest chung cho Addon
 function getManifest() {
   return {
     id: 'org.aisubtitlepro.stremio',
-    version: '1.1.1',
-    name: 'AI Subtitle Pro (Gemini)',
+    version: '1.3.2',
+    name: 'AI Subtitle Pro',
     description: 'Addon phụ đề thông minh tích hợp OpenSubtitles, SubDL và Google Gemini AI.',
     types: ['movie', 'series'],
     catalogs: [],
@@ -50,15 +49,14 @@ function getManifest() {
   };
 }
 
-// Định tuyến Manifest (Tách riêng để không bị lỗi 404)
-app.get('/manifest.json', (req, res) => {
-  res.json(getManifest());
-});
-app.get('/:config/manifest.json', (req, res) => {
-  res.json(getManifest());
-});
+// 1. Tự động chuyển hướng từ trang chủ sang trang cấu hình
+app.get('/', (req, res) => res.redirect('/configure'));
 
-// Trang cấu hình Addon (Giao diện cài đặt)
+// 2. Định tuyến Manifest
+app.get('/manifest.json', (req, res) => res.json(getManifest()));
+app.get('/:config/manifest.json', (req, res) => res.json(getManifest()));
+
+// 3. Giao diện trang cấu hình
 app.get('/configure', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -74,24 +72,22 @@ app.get('/configure', (req, res) => {
         input, select { width: 100%; padding: 10px; margin-top: 5px; background: #0f172a; border: 1px solid #334155; color: #fff; border-radius: 6px; box-sizing: border-box; }
         button { background: #38bdf8; color: #0f172a; border: none; padding: 12px; width: 100%; margin-top: 25px; font-weight: bold; border-radius: 6px; cursor: pointer; font-size: 16px; }
         button:hover { background: #0ea5e9; }
-        .note { font-size: 12px; color: #94a3b8; margin-top: 5px; }
       </style>
     </head>
     <body>
       <div class="card">
         <h2>Cấu hình AI Subtitle Pro</h2>
         <form id="configForm">
-          <label>Google Gemini API Key(s) (Phân cách bằng dấu phẩy):</label>
+          <label>Google Gemini API Key(s) (Tùy chọn):</label>
           <input type="text" id="geminiKeys" placeholder="AIzaSy...">
           
           <label>Model Gemini:</label>
           <select id="model">
-            <option value="gemini-2.5-flash">Gemini 2.5 Flash (Khuyên dùng)</option>
+            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
             <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-            <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
           </select>
 
-          <label>OpenSubtitles API Key (Tùy chọn):</label>
+          <label>OpenSubtitles API Key (Khuyên dùng để lấy sub chuẩn):</label>
           <input type="text" id="opensubtitlesApiKey" placeholder="API key từ opensubtitles.com">
 
           <label>SubDL API Key (Tùy chọn):</label>
@@ -119,108 +115,112 @@ app.get('/configure', (req, res) => {
   `);
 });
 
-app.get('/:config/configure', (req, res) => {
-  res.redirect('/configure');
-});
+app.get('/:config/configure', (req, res) => res.redirect('/configure'));
 
-// Hàm xử lý lấy phụ đề
+// 4. Hàm xử lý lấy phụ đề
 async function handleSubtitles(req, res, encodedConfig) {
   const { type, id } = req.params;
   const config = getConfig(encodedConfig);
-  let imdbId = id.split(':')[0]; // Ví dụ: tt1234567
+  let imdbId = id.split(':')[0];
+  let season = id.split(':')[1] || null;
+  let episode = id.split(':')[2] || null;
 
-  console.log(`[Subtitles Request] Type: ${type}, ID: ${imdbId}`);
   let subtitles = [];
 
-  // 1. Lấy từ OpenSubtitles nếu có API Key
+  // Lấy từ OpenSubtitles
   if (config.opensubtitlesApiKey) {
     try {
+      const params = {
+        imdb_id: imdbId.replace('tt', ''),
+        languages: config.targetLanguages.join(',')
+      };
+      if (type === 'series' && season && episode) {
+        params.season_number = season;
+        params.episode_number = episode;
+      }
+
       const osRes = await axios.get('https://api.opensubtitles.com/api/v1/subtitles', {
-        headers: {
-          'Api-Key': config.opensubtitlesApiKey,
-          'User-Agent': 'AISubtitlePro v1.1.1'
-        },
-        params: {
-          imdb_id: imdbId.replace('tt', ''),
-          languages: config.targetLanguages.join(',')
-        }
+        headers: { 'Api-Key': config.opensubtitlesApiKey, 'User-Agent': 'AISubtitlePro v1.3.2' },
+        params,
+        timeout: 6000
       });
+
       if (osRes.data && osRes.data.data) {
-        for (const item of osRes.data.data.slice(0, 5)) {
+        for (const item of osRes.data.data.slice(0, 10)) {
           const fileId = item.attributes.files?.[0]?.file_id;
           if (fileId) {
             try {
-              const dlRes = await axios.post('https://api.opensubtitles.com/api/v1/download', {
-                file_id: fileId
-              }, {
-                headers: {
-                  'Api-Key': config.opensubtitlesApiKey,
-                  'User-Agent': 'AISubtitlePro v1.1.1',
-                  'Content-Type': 'application/json'
-                }
+              const dlRes = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: fileId }, {
+                headers: { 'Api-Key': config.opensubtitlesApiKey, 'User-Agent': 'AISubtitlePro v1.3.2', 'Content-Type': 'application/json' },
+                timeout: 5000
               });
               if (dlRes.data && dlRes.data.link) {
                 subtitles.push({
                   id: `os-${item.id}`,
                   url: dlRes.data.link,
-                  lang: item.attributes.language,
-                  name: `OpenSubtitles [${item.attributes.language.toUpperCase()}]`
+                  lang: item.attributes.language || 'en',
+                  name: `OpenSubtitles [${(item.attributes.language || 'en').toUpperCase()}]`
                 });
               }
             } catch (dlErr) {}
           }
         }
       }
-    } catch (e) {
-      console.error('OpenSubtitles error:', e.message);
-    }
+    } catch (e) {}
   }
 
-  // 2. Lấy từ SubDL nếu có API Key
+  // Lấy từ SubDL
   if (config.subdlApiKey) {
     try {
+      const subdlParams = {
+        api_key: config.subdlApiKey,
+        imdb_id: imdbId,
+        langs: config.targetLanguages.join(',')
+      };
+      if (type === 'series' && season && episode) {
+        subdlParams.season_number = season;
+        subdlParams.episode_number = episode;
+      }
+
       const subdlRes = await axios.get('https://api.subdl.com/api/v1/subtitles', {
-        params: {
-          api_key: config.subdlApiKey,
-          imdb_id: imdbId,
-          langs: config.targetLanguages.join(',')
-        }
+        params: subdlParams,
+        timeout: 6000
       });
+
       if (subdlRes.data && subdlRes.data.status && subdlRes.data.subtitles) {
-        for (const sub of subdlRes.data.subtitles.slice(0, 5)) {
+        for (const sub of subdlRes.data.subtitles.slice(0, 10)) {
           if (sub.url) {
             const fullUrl = sub.url.startsWith('http') ? sub.url : `https://subdl.com${sub.url}`;
             subtitles.push({
               id: `subdl-${sub.sub_id || Math.random()}`,
               url: fullUrl,
-              lang: sub.language || 'vi',
-              name: `SubDL [${sub.language?.toUpperCase()}]`
+              lang: sub.language || 'en',
+              name: `SubDL [${(sub.language || 'en').toUpperCase()}]`
             });
           }
         }
       }
-    } catch (e) {
-      console.error('SubDL error:', e.message);
-    }
+    } catch (e) {}
   }
 
-  // Nếu không tìm thấy phụ đề từ các nguồn, trả về phụ đề thông báo mẫu để Stremio không bị trống
   if (subtitles.length === 0) {
     subtitles.push({
       id: 'ai-notice',
       url: 'https://raw.githubusercontent.com/SubtitleEdit/subtitleedit/master/CHANGELOG.txt',
       lang: 'vi',
-      name: '⚠️ Không tìm thấy phụ đề. Hãy nhập OpenSubtitles/SubDL API Key trong trang cấu hình.'
+      name: '⚠️ [AI Subtitle Pro] Hãy nhập OpenSubtitles API Key ở trang cấu hình để lấy phụ đề.'
     });
   }
 
   res.json({ subtitles });
 }
 
-// Định tuyến Subtitles (Tách riêng route không config và có config)
-app.get('/subtitles/:type/:id/:extra?.json', (req, res) => handleSubtitles(req, res, null));
-app.get('/:config/subtitles/:type/:id/:extra?.json', (req, res) => handleSubtitles(req, res, req.params.config));
+// Định tuyến Endpoint Subtitles chuẩn xác
+app.get('/subtitles/:type/:id.json', (req, res) => handleSubtitles(req, res, null));
+app.get('/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, res, null));
+app.get('/:config/subtitles/:type/:id.json', (req, res) => handleSubtitles(req, res, req.params.config));
+app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, res, req.params.config));
 
 app.listen(PORT, () => {
-  console.log(`AI Subtitle Pro server is running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
