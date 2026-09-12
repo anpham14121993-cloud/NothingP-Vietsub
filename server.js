@@ -335,7 +335,8 @@ app.get('/proxy-sub', async (req, res) => {
 
 const translationJobs = new Map();
 
-function splitSrtIntoChunks(srt, maxChars = 6500) {
+// Tăng maxChars lên 35000 để gom gọn file sub, hạn chế tối đa số lần request gây timeout
+function splitSrtIntoChunks(srt, maxChars = 35000) {
   const blocks = srt.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
   const chunks = [];
   let current = '';
@@ -403,10 +404,10 @@ app.get('/translate-sub', async (req, res) => {
       return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI TẢI FILE ĐỂ DỊCH]: ' + e.message);
     }
 
-    const chunks = splitSrtIntoChunks(originalSrt, 6500);
+    const chunks = splitSrtIntoChunks(originalSrt, 35000);
     job.total = chunks.length;
     job.status = 'Đang dịch';
-    job.detail = 'Đã chia SRT thành ' + chunks.length + ' phần';
+    job.detail = 'Đã chia SRT thành ' + chunks.length + ' phần lớn';
 
     const translated = [];
     const models = [...new Set([selectedModel, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'].filter(m => typeof m === 'string' && m.startsWith('gemini-')))];
@@ -439,14 +440,12 @@ app.get('/translate-sub', async (req, res) => {
               const u = 'https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent?key=' + key;
               const r = await axios.post(u, { contents: [{ parts: [{ text: prompt }] }] }, { timeout: 90000 });
               result = r.data?.candidates?.[0]?.content?.parts?.map(x => x.text || '').join('') || '';
-              if (result) break geminiKeyLoop; // Thành công thì thoát hoàn toàn mọi vòng lặp
+              if (result) break geminiKeyLoop;
             } catch (e) {
               lastError = e.response?.data?.error?.message || e.message;
-              // Nếu gặp lỗi quota (429), thử sang model tiếp theo trong danh sách của key này
               if (e.response?.status === 429 || /quota|RESOURCE_EXHAUSTED/i.test(lastError)) {
                 continue; 
               } else {
-                // Nếu lỗi khác (như sai API key), bỏ qua key này luôn để nhảy sang key kế tiếp
                 break;
               }
             }
