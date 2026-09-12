@@ -115,7 +115,7 @@ function renderConfigPage(req, res, savedConfig) {
 
 const defaultManifest = {
     id: 'org.ai.subtitle.pro',
-    version: '1.4.3',
+    version: '1.4.5',
     name: 'AI Subtitle Pro',
     description: 'Addon phụ đề tự động tiếng Việt (Gemini + ChatGPT + Đa nguồn Sub)',
     types: ['movie', 'series'],
@@ -128,9 +128,12 @@ app.get('/manifest.json', (req, res) => res.json(defaultManifest));
 app.get('/:config/manifest.json', (req, res) => res.json(defaultManifest));
 
 const BROWSER_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.opensubtitles.com/',
+    'Origin': 'https://www.opensubtitles.com/',
+    'Cache-Control': 'no-cache'
 };
 
 async function handleSubtitles(req, res, encodedConfig) {
@@ -203,7 +206,7 @@ async function handleSubtitles(req, res, encodedConfig) {
         try {
             const subdlRes = await axios.get('https://api.subdl.com/api/v1/subtitles', {
                 params: { api_key: config.subdlKey, imdb_id: imdbId, type: type === 'series' ? 'tv' : 'movie', season, episode, languages: 'vi,en,vie' },
-                headers: BROWSER_HEADERS,
+                headers: { ...BROWSER_HEADERS, 'Referer': 'https://subdl.com/' },
                 timeout: 5000
             });
 
@@ -239,7 +242,7 @@ async function handleSubtitles(req, res, encodedConfig) {
         try {
             const subsourceRes = await axios.get(`https://api.subsource.dev/api/subtitles`, {
                 params: { imdb: imdbId, lang: 'vi,en,vie' },
-                headers: { 'Authorization': `Bearer ${config.subsourceKey}`, ...BROWSER_HEADERS },
+                headers: { 'Authorization': `Bearer ${config.subsourceKey}`, ...BROWSER_HEADERS, 'Referer': 'https://subsource.dev/' },
                 timeout: 5000
             });
 
@@ -269,6 +272,15 @@ async function handleSubtitles(req, res, encodedConfig) {
         } catch (e) {}
     }
 
+    // 🔥 SẮP XẾP LẠI: Ưu tiên đưa tất cả Sub Việt gốc lên đầu danh sách hiển thị của Stremio
+    subtitles.sort((a, b) => {
+        const isAOriginal = a.name.includes('Tiếng Việt (Gốc');
+        const isBOriginal = b.name.includes('Tiếng Việt (Gốc');
+        if (isAOriginal && !isBOriginal) return -1;
+        if (!isAOriginal && isBOriginal) return 1;
+        return 0;
+    });
+
     if (subtitles.length === 0) {
         subtitles.push({
             id: 'ai-notice',
@@ -293,7 +305,6 @@ app.get('/proxy-sub', async (req, res) => {
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.send(response.data);
     } catch (error) {
-        // IN LỖI CHI TIẾT LÊN MÀN HÌNH KHI TẢI SUB GỐC THẤT BẠI
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.send(`1\n00:00:01,000 --> 00:00:08,000\n[LỖI TẢI SUB GỐC]: ${error.message}`);
     }
@@ -309,11 +320,18 @@ app.get('/translate-sub', async (req, res) => {
 
     let originalSrt = "";
     try {
-        const subResponse = await axios.get(url, { headers: BROWSER_HEADERS, responseType: 'text', timeout: 6000 });
+        const subResponse = await axios.get(url, { 
+            headers: { 
+                ...BROWSER_HEADERS, 
+                'Accept': 'text/plain, */*' 
+            }, 
+            responseType: 'text', 
+            timeout: 8000 
+        });
         originalSrt = typeof subResponse.data === 'string' ? subResponse.data : JSON.stringify(subResponse.data);
     } catch (e) {
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        return res.send(`1\n00:00:01,000 --> 00:00:08,000\n[LỖI TẢI FILE EN ĐỂ DỊCH]: ${e.message}`);
+        return res.send(`1\n00:00:01,000 --> 00:00:08,000\n[LỖI TẢI FILE EN ĐỂ DỊCH]: ${e.message} (Status: ${e.response?.status || 'Unknown'})`);
     }
 
     const prompt = `Bạn là dịch giả chuyên nghiệp. Hãy dịch toàn bộ nội dung file phụ đề SRT sau sang tiếng Việt tự nhiên, giữ nguyên cấu trúc thời gian (timestamps) và số thứ tự của SRT gốc. Chỉ trả về nội dung SRT đã dịch, không kèm giải thích:\n\n${originalSrt}`;
@@ -364,7 +382,6 @@ app.get('/translate-sub', async (req, res) => {
         }
     }
 
-    // NẾU VẪN LỖI: In thẳng nguyên nhân chi tiết lên màn hình phim cho bạn dễ check
     if (!success) {
         translatedSrt = `1\n00:00:01,000 --> 00:00:10,000\n[LỖI AI DỊCH]: ${lastErrorDetail}`;
     }
@@ -381,3 +398,4 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
+
