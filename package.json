@@ -1,0 +1,14 @@
+{
+  "name": "stremio-ai-subtitle",
+  "version": "2.2.0",
+  "description": "Stremio AI Subtitle Addon",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "express": "^4.21.2",
+    "stremio-addon-sdk": "^1.6.10"
+  }
+}
