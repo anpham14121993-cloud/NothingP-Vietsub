@@ -433,24 +433,24 @@ app.get('/translate-sub', async (req, res) => {
       }
 
       if (!result && geminiKeys.length) {
-        for (const key of geminiKeys) {
-          let keyExhausted = false;
+        geminiKeyLoop: for (const key of geminiKeys) {
           for (const m of models) {
             try {
               const u = 'https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent?key=' + key;
               const r = await axios.post(u, { contents: [{ parts: [{ text: prompt }] }] }, { timeout: 90000 });
               result = r.data?.candidates?.[0]?.content?.parts?.map(x => x.text || '').join('') || '';
-              if (result) break;
+              if (result) break geminiKeyLoop; // Thành công thì thoát hoàn toàn mọi vòng lặp
             } catch (e) {
               lastError = e.response?.data?.error?.message || e.message;
+              // Nếu gặp lỗi quota (429), thử sang model tiếp theo trong danh sách của key này
               if (e.response?.status === 429 || /quota|RESOURCE_EXHAUSTED/i.test(lastError)) {
-                keyExhausted = true;
+                continue; 
+              } else {
+                // Nếu lỗi khác (như sai API key), bỏ qua key này luôn để nhảy sang key kế tiếp
                 break;
               }
             }
           }
-          if (result) break;         // Đã dịch thành công phần này, thoát vòng lặp key
-          if (keyExhausted) continue; // Key này hết quota, chuyển sang key tiếp theo (Key 2, Key 3)
         }
       }
 
@@ -487,3 +487,4 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
+
