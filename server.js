@@ -297,7 +297,6 @@ async function handleSubtitles(req, res, encodedConfig) {
     } catch (e) {}
   }
 
-  // Sắp xếp đưa sub Việt gốc lên đầu danh sách hiển thị
   subtitles.sort((a, b) => {
     const isAOriginal = a.name.includes('Tiếng Việt (Gốc');
     const isBOriginal = b.name.includes('Tiếng Việt (Gốc');
@@ -333,10 +332,7 @@ app.get('/proxy-sub', async (req, res) => {
   }
 });
 
-const translationJobs = new Map();
-
-// Tăng maxChars lên 35000 để gom gọn file sub, hạn chế tối đa số lần request gây timeout
-function splitSrtIntoChunks(srt, maxChars = 35000) {
+function splitSrtIntoChunks(srt, maxChars = 12000) {
   const blocks = srt.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
   const chunks = [];
   let current = '';
@@ -351,38 +347,10 @@ function splitSrtIntoChunks(srt, maxChars = 35000) {
   return chunks.length ? chunks : [srt];
 }
 
-function etaText(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return 'Đang tính...';
-  const n = Math.ceil(seconds);
-  return n < 60 ? n + ' giây' : Math.floor(n / 60) + ' phút ' + (n % 60) + ' giây';
-}
-
-app.get('/status', (req, res) => {
-  res.type('html').send(`<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Subtitle Pro - Tiến độ</title><style>body{font:16px Arial;background:#121212;color:#eee;padding:20px;max-width:760px;margin:auto}h2{color:#ff5252}.job{background:#222;padding:14px;border-radius:8px;margin:12px 0}.bar{height:10px;background:#444;border-radius:8px;overflow:hidden}.fill{height:100%;background:#4caf50;width:0}.muted{color:#bbb;font-size:13px}</style><h2>AI Subtitle Pro — Tiến độ dịch</h2><p class="muted">Trang tự cập nhật mỗi 2,5 giây. Giữ trang này mở trong khi Stremio tải phụ đề.</p><div id="jobs">Đang tải trạng thái...</div><script>async function refresh(){try{const r=await fetch("/status.json");const d=await r.json();const root=document.getElementById("jobs");if(!d.jobs.length){root.textContent="Chưa có tác vụ dịch gần đây.";return;}root.innerHTML=d.jobs.map(j=>{const pct=j.total?Math.floor(j.done/j.total*100):0;return "<div class=\\"job\\"><b>"+j.status+"</b><p>"+j.done+" / "+j.total+" phần ("+pct+"%)</p><div class=\\"bar\\"><div class=\\"fill\\" style=\\"width:"+pct+"%\\"></div></div><p>Ước tính còn: "+j.eta+"</p><p class=\\"muted\\">"+j.detail+"</p></div>"}).join("");}catch(e){document.getElementById("jobs").textContent="Không đọc được trạng thái: "+e.message;}}refresh();setInterval(refresh,2500);</script></html>`);
-});
-
-app.get('/status.json', (req, res) => {
-  const jobs = [...translationJobs.values()]
-    .sort((a, b) => b.started - a.started)
-    .slice(0, 15)
-    .map(j => ({
-      status: j.status,
-      done: j.done,
-      total: j.total,
-      eta: j.status === 'Hoàn tất' || j.status === 'Lỗi' ? '0 giây' : etaText(j.avgSeconds * (j.total - j.done)),
-      detail: j.detail
-    }));
-  res.json({ jobs });
-});
-
 app.get('/translate-sub', async (req, res) => {
   const { url, model, config: configQuery } = req.query;
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   if (!url) return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI]: Đường link tải phụ đề bị trống.');
-
-  const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-  const job = { started: Date.now(), done: 0, total: 0, avgSeconds: 12, status: 'Đang tải phụ đề', detail: 'Đang tải file SRT' };
-  translationJobs.set(jobId, job);
 
   try {
     const config = parseConfig(configQuery);
@@ -399,21 +367,15 @@ app.get('/translate-sub', async (req, res) => {
       });
       originalSrt = typeof subResponse.data === 'string' ? subResponse.data : JSON.stringify(subResponse.data);
     } catch (e) {
-      job.status = 'Lỗi';
-      job.detail = 'Không tải được SRT: ' + e.message;
       return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI TẢI FILE ĐỂ DỊCH]: ' + e.message);
     }
 
-    const chunks = splitSrtIntoChunks(originalSrt, 35000);
-    job.total = chunks.length;
-    job.status = 'Đang dịch';
-    job.detail = 'Đã chia SRT thành ' + chunks.length + ' phần lớn';
-
-    const translated = [];
+    const chunks = splitSrtIntoChunks(originalSrt, 12000);
     const models = [...new Set([selectedModel, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'].filter(m => typeof m === 'string' && m.startsWith('gemini-')))];
 
-    for (let i = 0; i < chunks.length; i++) {
-      const prompt = 'Bạn là dịch giả phụ đề chuyên nghiệp. Dịch nội dung SRT sau sang tiếng Việt tự nhiên. BẮT BUỘC giữ nguyên tuyệt đối số thứ tự, timestamp và cấu trúc từng mục; không gộp, không bỏ, không thêm mục. Chỉ trả về SRT đã dịch, không giải thích.\n\n' + chunks[i];
+    // Dịch song song tất cả các chunk cùng một lúc bằng Promise.all
+    const translationPromises = chunks.map(async (chunk, i) => {
+      const prompt = 'Bạn là dịch giả phụ đề chuyên nghiệp. Dịch nội dung SRT sau sang tiếng Việt tự nhiên. BẮT BUỘC giữ nguyên tuyệt đối số thứ tự, timestamp và cấu trúc từng mục; không gộp, không bỏ, không thêm mục. Chỉ trả về SRT đã dịch, không giải thích.\n\n' + chunk;
       let result = '';
       let lastError = 'Chưa rõ nguyên nhân';
 
@@ -454,27 +416,18 @@ app.get('/translate-sub', async (req, res) => {
       }
 
       if (!result) {
-        job.status = 'Lỗi';
-        job.detail = 'Lỗi ở phần ' + (i + 1) + '/' + chunks.length + ': ' + lastError;
-        return res.send('1\n00:00:01,000 --> 00:00:10,000\n[LỖI AI DỊCH - phần ' + (i + 1) + ']: ' + lastError);
+        throw new Error(`Lỗi ở phần ${i + 1}/${chunks.length}: ${lastError}`);
       }
 
-      translated.push(result.trim());
-      job.done = i + 1;
-      const elapsed = (Date.now() - job.started) / 1000;
-      job.avgSeconds = elapsed / job.done;
-      job.detail = 'Đã dịch xong phần ' + job.done + '/' + job.total;
-    }
+      return { index: i, text: result.trim() };
+    });
 
-    job.status = 'Hoàn tất';
-    job.detail = 'Đã dịch xong toàn bộ ' + job.total + ' phần';
-    return res.send(translated.join('\n\n'));
+    const translatedResults = await Promise.all(translationPromises);
+    translatedResults.sort((a, b) => a.index - b.index);
+    
+    return res.send(translatedResults.map(r => r.text).join('\n\n'));
   } catch (e) {
-    job.status = 'Lỗi';
-    job.detail = e.message;
     return res.send('1\n00:00:01,000 --> 00:00:10,000\n[LỖI AI DỊCH]: ' + e.message);
-  } finally {
-    setTimeout(() => translationJobs.delete(jobId), 30 * 60 * 1000);
   }
 });
 
@@ -486,4 +439,3 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
-
