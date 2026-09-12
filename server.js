@@ -15,7 +15,7 @@ function parseConfig(encodedConfig) {
     }
 }
 
-// 1. Giao diện trang cấu hình (/configure và /:config/configure)
+// 1. Giao diện trang cấu hình đầy đủ tất cả các mục
 app.get('/:config?/configure', (req, res) => {
     const savedConfig = parseConfig(req.params.config) || {};
     
@@ -41,7 +41,7 @@ app.get('/:config?/configure', (req, res) => {
         <div class="container">
             <h2>Cấu hình AI Subtitle Pro</h2>
             <form id="configForm">
-                <label>Mô hình ưu tiên:</label>
+                <label>Mô hình Gemini ưu tiên:</label>
                 <select id="modelSelect">
                     <option value="gemini-1.5-flash" ${savedConfig.model === 'gemini-1.5-flash' ? 'selected' : ''}>Gemini 1.5 Flash (Khuyên dùng - Ổn định nhất)</option>
                     <option value="gemini-3.7-flash" ${savedConfig.model === 'gemini-3.7-flash' ? 'selected' : ''}>Gemini 3.7 Flash</option>
@@ -56,8 +56,26 @@ app.get('/:config?/configure', (req, res) => {
                 <label>Gemini API Key 3:</label>
                 <input type="text" id="geminiKey3" value="${savedConfig.geminiKeys?.[2] || ''}" placeholder="AIzaSy..." />
 
+                <label>ChatGPT / OpenAI API Key (Tùy chọn):</label>
+                <input type="text" id="openaiKey" value="${savedConfig.openaiKey || ''}" placeholder="sk-..." />
+
+                <label>TMDB API Key (Tùy chọn):</label>
+                <input type="text" id="tmdbKey" value="${savedConfig.tmdbKey || ''}" placeholder="TMDB Key" />
+
                 <label>OpenSubtitles API Key:</label>
                 <input type="text" id="opensubtitlesKey" value="${savedConfig.opensubtitlesKey || ''}" placeholder="OpenSubtitles Consumer Key" />
+
+                <label>Subsource API Key (Tùy chọn):</label>
+                <input type="text" id="subsourceKey" value="${savedConfig.subsourceKey || ''}" placeholder="Subsource Key" />
+
+                <label>Subdl API Key (Tùy chọn):</label>
+                <input type="text" id="subdlKey" value="${savedConfig.subdlKey || ''}" placeholder="Subdl Key" />
+
+                <label>Phong cách dịch:</label>
+                <select id="translationStyle">
+                    <option value="natural" ${savedConfig.style === 'natural' ? 'selected' : ''}>Tự nhiên / Chuẩn mực</option>
+                    <option value="literal" ${savedConfig.style === 'literal' ? 'selected' : ''}>Sát nghĩa gốc</option>
+                </select>
 
                 <button type="button" class="btn-install" id="installBtn">Cài đặt vào Stremio</button>
 
@@ -80,7 +98,12 @@ app.get('/:config?/configure', (req, res) => {
                         document.getElementById('geminiKey2').value.trim(),
                         document.getElementById('geminiKey3').value.trim()
                     ].filter(k => k),
-                    opensubtitlesKey: document.getElementById('opensubtitlesKey').value.trim()
+                    openaiKey: document.getElementById('openaiKey').value.trim(),
+                    tmdbKey: document.getElementById('tmdbKey').value.trim(),
+                    opensubtitlesKey: document.getElementById('opensubtitlesKey').value.trim(),
+                    subsourceKey: document.getElementById('subsourceKey').value.trim(),
+                    subdlKey: document.getElementById('subdlKey').value.trim(),
+                    style: document.getElementById('translationStyle').value
                 };
                 const encoded = encodeURIComponent(JSON.stringify(config));
                 return \`\${window.location.origin}/\${encoded}/manifest.json\`;
@@ -124,7 +147,7 @@ const defaultManifest = {
     id: 'org.ai.subtitle.pro',
     version: '1.0.0',
     name: 'AI Subtitle Pro',
-    description: 'Addon phụ đề tự động tiếng Việt với Gemini và OpenSubtitles',
+    description: 'Addon phụ đề tự động tiếng Việt với Gemini, OpenSubtitles, Subdl & Subsource',
     types: ['movie', 'series'],
     catalogs: [],
     resources: ['subtitles'],
@@ -143,7 +166,7 @@ app.get('/:config?/manifest.json', (req, res) => {
     res.json(manifest);
 });
 
-// 3. Endpoint Phụ đề (Subtitles)
+// 3. Endpoint Phụ đề (Subtitles) - Tích hợp OpenSubtitles, Subdl và Subsource
 app.get('/:config?/subtitles/:type/:id/:extra?.json', async (req, res) => {
     const config = parseConfig(req.params.config) || {};
     const { type, id } = req.params;
@@ -154,16 +177,17 @@ app.get('/:config?/subtitles/:type/:id/:extra?.json', async (req, res) => {
     const episode = idParts[2] ? parseInt(idParts[2]) : null;
 
     let subtitles = [];
+    const geminiKey = (config.geminiKeys && config.geminiKeys[0]) || process.env.GEMINI_API_KEY;
+    const modelToUse = config.model || 'gemini-1.5-flash';
 
+    // --- 1. LẤY TỪ OPENSUBTITLES ---
     try {
         const opensubtitlesKey = config.opensubtitlesKey || process.env.OPEN_SUBTITLES_API_KEY;
         if (opensubtitlesKey) {
             const osParams = { languages: 'vi,en' };
-
             if (imdbId && imdbId.startsWith('tt')) {
                 osParams.imdb_id = imdbId.replace('tt', '');
             }
-
             if (type === 'series' || (season !== null && episode !== null)) {
                 if (season) osParams.season_number = season;
                 if (episode) osParams.episode_number = episode;
@@ -171,11 +195,8 @@ app.get('/:config?/subtitles/:type/:id/:extra?.json', async (req, res) => {
 
             const osResponse = await axios.get(`https://api.opensubtitles.com/api/v1/subtitles`, {
                 params: osParams,
-                headers: {
-                    'Api-Key': opensubtitlesKey,
-                    'User-Agent': 'AiSubtitlePro v1.0.0'
-                },
-                timeout: 6000
+                headers: { 'Api-Key': opensubtitlesKey, 'User-Agent': 'AiSubtitlePro v1.0.0' },
+                timeout: 5000
             });
 
             if (osResponse.data && osResponse.data.data) {
@@ -186,39 +207,21 @@ app.get('/:config?/subtitles/:type/:id/:extra?.json', async (req, res) => {
                     const fileId = subFile.file_id;
 
                     try {
-                        const downloadRes = await axios.post('https://api.opensubtitles.com/api/v1/download', {
-                            file_id: fileId
-                        }, {
-                            headers: {
-                                'Api-Key': opensubtitlesKey,
-                                'User-Agent': 'AiSubtitlePro v1.0.0',
-                                'Content-Type': 'application/json'
-                            },
+                        const downloadRes = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: fileId }, {
+                            headers: { 'Api-Key': opensubtitlesKey, 'User-Agent': 'AiSubtitlePro v1.0.0', 'Content-Type': 'application/json' },
                             timeout: 4000
                         });
-
                         const realDownloadUrl = downloadRes.data.link;
                         if (!realDownloadUrl) continue;
 
                         if (lang === 'vi') {
+                            subtitles.push({ id: `os-vi-${item.id}`, url: realDownloadUrl, lang: 'vie' });
+                        } else if (lang === 'en' && geminiKey) {
                             subtitles.push({
-                                id: `os-vi-${item.id}`,
-                                url: realDownloadUrl,
-                                lang: 'vie',
-                                file_id: String(fileId)
+                                id: `ai-os-${item.id}`,
+                                url: `${req.protocol}://${req.get('host')}/translate-sub?url=${encodeURIComponent(realDownloadUrl)}&key=${encodeURIComponent(geminiKey)}&model=${modelToUse}`,
+                                lang: 'vie'
                             });
-                        } else if (lang === 'en') {
-                            const modelToUse = config.model || 'gemini-1.5-flash';
-                            const geminiKey = (config.geminiKeys && config.geminiKeys[0]) || process.env.GEMINI_API_KEY;
-
-                            if (geminiKey) {
-                                subtitles.push({
-                                    id: `ai-vi-${item.id}`,
-                                    url: `${req.protocol}://${req.get('host')}/translate-sub?url=${encodeURIComponent(realDownloadUrl)}&key=${encodeURIComponent(geminiKey)}&model=${modelToUse}`,
-                                    lang: 'vie',
-                                    file_id: `ai_${fileId}`
-                                });
-                            }
                         }
                     } catch (dlErr) {}
                 }
@@ -226,6 +229,80 @@ app.get('/:config?/subtitles/:type/:id/:extra?.json', async (req, res) => {
         }
     } catch (osErr) {
         console.error('OpenSubtitles lỗi:', osErr.message);
+    }
+
+    // --- 2. LẤY TỪ SUBDL ---
+    try {
+        const subdlKey = config.subdlKey;
+        if (subdlKey && imdbId) {
+            const subdlRes = await axios.get('https://api.subdl.com/api/v1/subtitles', {
+                params: {
+                    api_key: subdlKey,
+                    imdb_id: imdbId,
+                    type: type === 'series' ? 'tv' : 'movie',
+                    season: season,
+                    episode: episode,
+                    languages: 'vi,en'
+                },
+                timeout: 5000
+            });
+
+            if (subdlRes.data && subdlRes.data.subtitles) {
+                for (const sub of subdlRes.data.subtitles) {
+                    const lang = sub.lang ? sub.lang.toLowerCase() : '';
+                    let dlUrl = sub.url;
+                    if (dlUrl && !dlUrl.startsWith('http')) {
+                        dlUrl = `https://subdl.com${dlUrl}`;
+                    }
+                    if (!dlUrl) continue;
+
+                    if (lang === 'vi' || lang === 'vietnamese') {
+                        subtitles.push({ id: `subdl-vi-${sub.les_id || Math.random()}`, url: dlUrl, lang: 'vie' });
+                    } else if ((lang === 'en' || lang === 'english') && geminiKey) {
+                        subtitles.push({
+                            id: `ai-subdl-${sub.les_id || Math.random()}`,
+                            url: `${req.protocol}://${req.get('host')}/translate-sub?url=${encodeURIComponent(dlUrl)}&key=${encodeURIComponent(geminiKey)}&model=${modelToUse}`,
+                            lang: 'vie'
+                        });
+                    }
+                }
+            }
+        }
+    } catch (subdlErr) {
+        console.error('Subdl lỗi:', subdlErr.message);
+    }
+
+    // --- 3. LẤY TỪ SUBSOURCE ---
+    try {
+        const subsourceKey = config.subsourceKey;
+        if (subsourceKey && imdbId) {
+            // Gọi API Subsource tiêu chuẩn
+            const subsourceRes = await axios.get(`https://api.subsource.dev/api/subtitles`, {
+                params: { imdb: imdbId, lang: 'vi,en' },
+                headers: { 'Authorization': `Bearer ${subsourceKey}` },
+                timeout: 5000
+            });
+
+            if (subsourceRes.data && Array.isArray(subsourceRes.data)) {
+                for (const sub of subsourceRes.data) {
+                    const lang = sub.language ? sub.language.toLowerCase() : '';
+                    const dlUrl = sub.url || sub.downloadUrl;
+                    if (!dlUrl) continue;
+
+                    if (lang === 'vi' || lang === 'vietnamese') {
+                        subtitles.push({ id: `subsource-vi-${sub.id || Math.random()}`, url: dlUrl, lang: 'vie' });
+                    } else if ((lang === 'en' || lang === 'english') && geminiKey) {
+                        subtitles.push({
+                            id: `ai-subsource-${sub.id || Math.random()}`,
+                            url: `${req.protocol}://${req.get('host')}/translate-sub?url=${encodeURIComponent(dlUrl)}&key=${encodeURIComponent(geminiKey)}&model=${modelToUse}`,
+                            lang: 'vie'
+                        });
+                    }
+                }
+            }
+        }
+    } catch (subsourceErr) {
+        console.error('Subsource lỗi:', subsourceErr.message);
     }
 
     res.json({ subtitles });
@@ -240,7 +317,6 @@ app.get('/translate-sub', async (req, res) => {
         const subResponse = await axios.get(url);
         const originalSrt = subResponse.data;
 
-        // Tính toán thời gian dự kiến dựa trên số dòng của sub gốc (~3 giây cho mỗi 150 dòng)
         const lineCount = originalSrt.split(/\r?\n/).length;
         const estimatedSeconds = Math.max(3, Math.round(lineCount / 150 * 3));
 
