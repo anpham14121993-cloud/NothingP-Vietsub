@@ -137,9 +137,9 @@ function renderConfigPage(req, res, savedConfig) {
 
 const defaultManifest = {
   id: 'org.ai.subtitle.pro',
-  version: '1.5.7',
+  version: '1.5.10',
   name: 'AI Subtitle Pro',
-  description: 'Addon phụ đề tự động tiếng Việt thông minh (Gemini + ChatGPT + Phân tích ngữ cảnh tập phim)',
+  description: 'Addon phụ đề tự động tiếng Việt thông minh (Gemini + ChatGPT + Thông báo màn hình phim)',
   types: ['movie', 'series'],
   catalogs: [],
   resources: ['subtitles'],
@@ -152,7 +152,7 @@ app.get('/manifest.json', (req, res) => res.json(defaultManifest));
 app.get('/:config/manifest.json', (req, res) => res.json(defaultManifest));
 
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v1.5.7',
+  'User-Agent': 'AISubtitlePro v1.5.10',
   'Accept': 'application/json'
 };
 
@@ -167,6 +167,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   let subtitles = [];
   const hostUrl = `${req.protocol}://${req.get('host')}`;
   const modelToUse = config.model || 'gemini-3.8-flash';
+  const estTimeStr = type === 'series' ? '15-20s' : '25-35s';
 
   // 1. OpenSubtitles
   if (config.opensubtitlesKey) {
@@ -197,7 +198,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             const realDownloadUrl = downloadRes.data.link;
             if (!realDownloadUrl) continue;
 
-            const originalName = subFile.file_name || item.attributes.release || 'OpenSubtitles File';
+            const originalName = item.attributes.release || subFile.file_name || 'OpenSubtitles File';
 
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
@@ -211,7 +212,7 @@ async function handleSubtitles(req, res, encodedConfig) {
                 id: `ai-os-${item.id}`,
                 url: `${hostUrl}/translate-sub?url=${encodeURIComponent(realDownloadUrl)}&model=${modelToUse}&config=${encodedConfig || ''}&imdbId=${imdbId}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
                 lang: 'vie',
-                name: `🤖 AI [${modelToUse}] (OpenSubtitles): ${originalName}`
+                name: `🤖 AI [${modelToUse}] (OpenSubtitles) [⏱️ Dự kiến ~${estTimeStr}]: ${originalName}`
               });
             }
           } catch (errDl) {}
@@ -241,7 +242,8 @@ async function handleSubtitles(req, res, encodedConfig) {
           let dlUrl = sub.url;
           if (dlUrl) {
             if (!dlUrl.startsWith('http')) dlUrl = `https://subdl.com${dlUrl}`;
-            const originalName = sub.name || sub.release_name || sub.filename || 'Subdl File';
+            
+            const originalName = sub.release_name || sub.name || sub.filename || 'Subdl File';
 
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
@@ -255,7 +257,7 @@ async function handleSubtitles(req, res, encodedConfig) {
                 id: `ai-subdl-${sub.les_id || Math.random()}`,
                 url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${modelToUse}&config=${encodedConfig || ''}&imdbId=${imdbId}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
                 lang: 'vie',
-                name: `🤖 AI [${modelToUse}] (Subdl): ${originalName}`
+                name: `🤖 AI [${modelToUse}] (Subdl) [⏱️ Dự kiến ~${estTimeStr}]: ${originalName}`
               });
             }
           }
@@ -280,7 +282,8 @@ async function handleSubtitles(req, res, encodedConfig) {
             if (!dlUrl.startsWith('http')) {
               dlUrl = `https://subsource.net${dlUrl}`;
             }
-            const originalName = sub.name || sub.fileName || sub.releaseName || 'Subsource File';
+            
+            const originalName = sub.releaseName || sub.fileName || sub.name || 'Subsource File';
 
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
@@ -294,7 +297,7 @@ async function handleSubtitles(req, res, encodedConfig) {
                 id: `ai-subsource-${sub.id || Math.random()}`,
                 url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${modelToUse}&config=${encodedConfig || ''}&imdbId=${imdbId}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
                 lang: 'vie',
-                name: `🤖 AI [${modelToUse}] (Subsource): ${originalName}`
+                name: `🤖 AI [${modelToUse}] (Subsource) [⏱️ Dự kiến ~${estTimeStr}]: ${originalName}`
               });
             }
           }
@@ -327,7 +330,7 @@ app.get('/proxy-sub', async (req, res) => {
   const { url, provider, key } = req.query;
   if (!url) return res.status(400).send('Missing URL');
   try {
-    const headers = { 'User-Agent': 'AISubtitlePro v1.5.7' };
+    const headers = { 'User-Agent': 'AISubtitlePro v1.5.10' };
     if (provider === 'subsource' && key) headers['Authorization'] = `Bearer ${key}`;
     const response = await axios.get(url, { headers, responseType: 'text', timeout: 8000 });
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -353,10 +356,31 @@ function splitSrtIntoChunks(srt, maxChars = 8000) {
   return chunks.length ? chunks : [srt];
 }
 
-function cleanAndRebuildSrt(srtText) {
+function parseTimeToMs(timeStr) {
+  if (!timeStr) return 0;
+  const parts = timeStr.trim().split(':');
+  if (parts.length < 3) return 0;
+  const h = parseInt(parts[0], 10) || 0;
+  const m = parseInt(parts[1], 10) || 0;
+  const sParts = parts[2].split(',');
+  const s = parseInt(sParts[0], 10) || 0;
+  const ms = parseInt(sParts[1], 10) || 0;
+  return h * 3600000 + m * 60000 + s * 1000 + ms;
+}
+
+// Thêm dòng thông báo trạng thái/thông tin model trực tiếp lên màn hình phim ở những giây đầu
+function cleanAndRebuildSrt(srtText, modelName, estTimeStr) {
   const cleaned = srtText.replace(/\r/g, '').trim();
   const blockStrs = cleaned.split(/\n\s*\n/).filter(Boolean);
   const entries = [];
+
+  // Chèn thông báo tóm tắt hiển thị trực tiếp lên màn hình phim từ giây 00:01 đến 00:06
+  entries.push({
+    start: '00:00:01,000',
+    end: '00:00:06,000',
+    text: `🤖 [AI Subtitle Pro] Đã dịch xong bởi ${modelName}\n⏱️ Thời gian dịch: ~${estTimeStr}`,
+    startMs: 1000
+  });
 
   for (const blockStr of blockStrs) {
     const lines = blockStr.split('\n');
@@ -375,11 +399,14 @@ function cleanAndRebuildSrt(srtText) {
         entries.push({
           start: start,
           end: end,
-          text: textLines.join('\n')
+          text: textLines.join('\n'),
+          startMs: parseTimeToMs(start)
         });
       }
     }
   }
+
+  entries.sort((a, b) => a.startMs - b.startMs);
 
   let resultSrt = '';
   for (let i = 0; i < entries.length; i++) {
@@ -443,11 +470,12 @@ app.get('/translate-sub', async (req, res) => {
     const geminiKeys = (config.geminiKeys || [process.env.GEMINI_API_KEY].filter(Boolean)).filter(Boolean);
     const openaiKey = config.openaiKey || process.env.OPENAI_API_KEY;
     const selectedModel = model || config.model || 'gemini-3.8-flash';
+    const estTimeStr = type === 'series' ? '15-20s' : '25-35s';
 
     let originalSrt;
     try {
       const subResponse = await axios.get(url, {
-        headers: { 'User-Agent': 'AISubtitlePro v1.5.7', 'Accept': 'text/plain, */*' },
+        headers: { 'User-Agent': 'AISubtitlePro v1.5.10', 'Accept': 'text/plain, */*' },
         responseType: 'text',
         timeout: 20000
       });
@@ -466,7 +494,6 @@ app.get('/translate-sub', async (req, res) => {
       modelOrder = [selectedModel, ...allGeminiModels.filter(m => m !== selectedModel), ...allGptModels];
     }
 
-    // 1. Lấy thông tin chung của phim và thông tin cụ thể của tập phim từ Cinemeta
     let movieContextStr = "Phim điện ảnh/truyền hình tổng quát.";
     if (imdbId) {
       try {
@@ -475,7 +502,6 @@ app.get('/translate-sub', async (req, res) => {
         if (meta) {
           movieContextStr = `Tên phim: ${meta.name || ''}\nThể loại: ${meta.genres?.join(', ') || ''}\nMô tả chung: ${meta.description || ''}`;
           
-          // Nếu là series, tìm thông tin riêng của tập đang xem (Season / Episode)
           if (type === 'series' && season && episode && Array.isArray(meta.videos)) {
             const currentEp = meta.videos.find(v => v.season === parseInt(season) && v.episode === parseInt(episode));
             if (currentEp) {
@@ -486,14 +512,12 @@ app.get('/translate-sub', async (req, res) => {
       } catch (e) {}
     }
 
-    // 2. Cho AI phân tích ngữ cảnh dựa trên thông tin tập phim và mẫu sub
     const sampleText = originalSrt.slice(0, 2000);
     const guidePrompt = `Dựa vào thông tin chi tiết về bộ phim và tập phim dưới đây, kết hợp với mẫu phụ đề, hãy phân tích và thiết lập quy tắc xưng hô tiếng Việt chuẩn xác nhất cho các nhân vật trong tập này:\n\n[THÔNG TIN PHIM & TẬP PHIM]:\n${movieContextStr}\n\n[MẪU PHỤ ĐỀ]:\n${sampleText}\n\nHãy tóm tắt ngắn gọn quy tắc xưng hô và bối cảnh cụ thể của tập này (bằng tiếng Việt):`;
     
     const guideRes = await callAI(guidePrompt, modelOrder, geminiKeys, openaiKey, 30000);
     const pronounGuide = guideRes.result ? `\n\n[QUY TẮC XƯNG HÔ & NGỮ CẢNH CỦA TẬP NÀY]:\n${guideRes.result}` : '';
 
-    // 3. Tiến hành chia nhỏ phụ đề và dịch đồng thời
     const chunks = splitSrtIntoChunks(originalSrt, 8000);
 
     const translationPromises = chunks.map(async (chunk, i) => {
@@ -512,7 +536,7 @@ app.get('/translate-sub', async (req, res) => {
     translatedResults.sort((a, b) => a.index - b.index);
     
     const combinedSrt = translatedResults.map(r => r.text).join('\n\n');
-    const finalSrt = cleanAndRebuildSrt(combinedSrt);
+    const finalSrt = cleanAndRebuildSrt(combinedSrt, selectedModel, estTimeStr);
 
     return res.send(finalSrt);
   } catch (e) {
