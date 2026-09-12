@@ -137,7 +137,7 @@ function renderConfigPage(req, res, savedConfig) {
 
 const defaultManifest = {
   id: 'org.ai.subtitle.pro',
-  version: '1.5.3',
+  version: '1.5.5',
   name: 'AI Subtitle Pro',
   description: 'Addon phụ đề tự động tiếng Việt (Gemini + ChatGPT + Đa nguồn Sub)',
   types: ['movie', 'series'],
@@ -152,7 +152,7 @@ app.get('/manifest.json', (req, res) => res.json(defaultManifest));
 app.get('/:config/manifest.json', (req, res) => res.json(defaultManifest));
 
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v1.5.3',
+  'User-Agent': 'AISubtitlePro v1.5.5',
   'Accept': 'application/json'
 };
 
@@ -197,19 +197,21 @@ async function handleSubtitles(req, res, encodedConfig) {
             const realDownloadUrl = downloadRes.data.link;
             if (!realDownloadUrl) continue;
 
+            const originalName = subFile.file_name || item.attributes.release || 'OpenSubtitles File';
+
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
                 id: `os-vi-${item.id}`,
                 url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(realDownloadUrl)}`,
                 lang: 'vie',
-                name: '🇻🇳 Tiếng Việt (Gốc - OpenSubtitles)'
+                name: `🇻🇳 [OpenSubtitles] ${originalName}`
               });
             } else if (['en', 'eng', 'english'].includes(lang)) {
               subtitles.push({
                 id: `ai-os-${item.id}`,
                 url: `${hostUrl}/translate-sub?url=${encodeURIComponent(realDownloadUrl)}&model=${modelToUse}&config=${encodedConfig || ''}`,
                 lang: 'vie',
-                name: `🤖 AI Dịch (${modelToUse}) [EN->VI]`
+                name: `🤖 AI [${modelToUse}] (OpenSubtitles): ${originalName}`
               });
             }
           } catch (errDl) {}
@@ -239,19 +241,21 @@ async function handleSubtitles(req, res, encodedConfig) {
           let dlUrl = sub.url;
           if (dlUrl) {
             if (!dlUrl.startsWith('http')) dlUrl = `https://subdl.com${dlUrl}`;
+            const originalName = sub.name || sub.release_name || sub.filename || 'Subdl File';
+
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
                 id: `subdl-vi-${sub.les_id || Math.random()}`,
                 url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(dlUrl)}`,
                 lang: 'vie',
-                name: '🇻🇳 Tiếng Việt (Gốc - Subdl)'
+                name: `🇻🇳 [Subdl] ${originalName}`
               });
             } else if (['en', 'eng', 'english'].includes(lang)) {
               subtitles.push({
                 id: `ai-subdl-${sub.les_id || Math.random()}`,
                 url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${modelToUse}&config=${encodedConfig || ''}`,
                 lang: 'vie',
-                name: `🤖 AI Dịch (${modelToUse}) [EN->VI]`
+                name: `🤖 AI [${modelToUse}] (Subdl): ${originalName}`
               });
             }
           }
@@ -276,19 +280,21 @@ async function handleSubtitles(req, res, encodedConfig) {
             if (!dlUrl.startsWith('http')) {
               dlUrl = `https://subsource.net${dlUrl}`;
             }
+            const originalName = sub.name || sub.fileName || sub.releaseName || 'Subsource File';
+
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
                 id: `subsource-vi-${sub.id || Math.random()}`,
                 url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(dlUrl)}&provider=subsource&key=${encodeURIComponent(config.subsourceKey)}`,
                 lang: 'vie',
-                name: '🇻🇳 Tiếng Việt (Gốc - Subsource)'
+                name: `🇻🇳 [Subsource] ${originalName}`
               });
             } else if (['en', 'eng', 'english'].includes(lang)) {
               subtitles.push({
                 id: `ai-subsource-${sub.id || Math.random()}`,
                 url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${modelToUse}&config=${encodedConfig || ''}`,
                 lang: 'vie',
-                name: `🤖 AI Dịch (${modelToUse}) [EN->VI]`
+                name: `🤖 AI [${modelToUse}] (Subsource): ${originalName}`
               });
             }
           }
@@ -298,8 +304,8 @@ async function handleSubtitles(req, res, encodedConfig) {
   }
 
   subtitles.sort((a, b) => {
-    const isAOriginal = a.name.includes('Tiếng Việt (Gốc');
-    const isBOriginal = b.name.includes('Tiếng Việt (Gốc');
+    const isAOriginal = a.name.includes('🇻🇳');
+    const isBOriginal = b.name.includes('🇻🇳');
     if (isAOriginal && !isBOriginal) return -1;
     if (!isAOriginal && isBOriginal) return 1;
     return 0;
@@ -321,7 +327,7 @@ app.get('/proxy-sub', async (req, res) => {
   const { url, provider, key } = req.query;
   if (!url) return res.status(400).send('Missing URL');
   try {
-    const headers = { 'User-Agent': 'AISubtitlePro v1.5.3' };
+    const headers = { 'User-Agent': 'AISubtitlePro v1.5.5' };
     if (provider === 'subsource' && key) headers['Authorization'] = `Bearer ${key}`;
     const response = await axios.get(url, { headers, responseType: 'text', timeout: 8000 });
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -396,7 +402,7 @@ app.get('/translate-sub', async (req, res) => {
     let originalSrt;
     try {
       const subResponse = await axios.get(url, {
-        headers: { 'User-Agent': 'AISubtitlePro v1.5.3', 'Accept': 'text/plain, */*' },
+        headers: { 'User-Agent': 'AISubtitlePro v1.5.5', 'Accept': 'text/plain, */*' },
         responseType: 'text',
         timeout: 20000
       });
@@ -407,16 +413,13 @@ app.get('/translate-sub', async (req, res) => {
 
     const chunks = splitSrtIntoChunks(originalSrt, 8000);
 
-    // Xây dựng thứ tự danh sách mô hình dự phòng chuẩn theo ý bạn:
     const allGeminiModels = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
     const allGptModels = ['gpt-4o-mini', 'gpt-4o'];
     
     let modelOrder = [];
     if (selectedModel.startsWith('gpt-')) {
-      // Nếu ưu tiên ChatGPT: chạy các model GPT trước, sau đó mới đến toàn bộ Gemini
       modelOrder = [selectedModel, ...allGptModels.filter(m => m !== selectedModel), ...allGeminiModels];
     } else {
-      // Nếu ưu tiên Gemini: chạy model Gemini đã chọn trước, quét tiếp các model Gemini còn lại, cuối cùng mới sang GPT
       modelOrder = [selectedModel, ...allGeminiModels.filter(m => m !== selectedModel), ...allGptModels];
     }
 
@@ -425,7 +428,6 @@ app.get('/translate-sub', async (req, res) => {
       let result = '';
       let lastError = 'Chưa rõ nguyên nhân';
 
-      // Vòng lặp tuần tự qua danh sách model theo đúng chuỗi dự phòng ưu tiên
       for (const m of modelOrder) {
         if (m.startsWith('gemini-')) {
           if (!geminiKeys.length) continue;
@@ -461,7 +463,7 @@ app.get('/translate-sub', async (req, res) => {
           }
         }
 
-        if (result) break; // Nếu đã dịch thành công ở model này thì thoát vòng lặp dự phòng
+        if (result) break;
       }
 
       if (!result) {
@@ -491,3 +493,4 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
+
