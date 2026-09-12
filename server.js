@@ -6,7 +6,7 @@ const PORT = process.env.PORT || 7000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 1. Giao diện trang cấu hình (/configure) có kèm ô copy link thủ công cho mobile
+// 1. Giao diện trang cấu hình (/configure)
 app.get('/configure', (req, res) => {
     res.send(`
     <!DOCTYPE html>
@@ -32,8 +32,8 @@ app.get('/configure', (req, res) => {
             <form id="configForm">
                 <label>Mô hình ưu tiên:</label>
                 <select id="modelSelect">
-                    <option value="gemini-3.7-flash" selected>Gemini 3.7 Flash (Mặc định - Khuyên dùng)</option>
-                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    <option value="gemini-1.5-flash" selected>Gemini 1.5 Flash (Khuyên dùng - Ổn định nhất)</option>
+                    <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                 </select>
 
                 <label>Gemini API Key 1:</label>
@@ -127,7 +127,7 @@ app.get('/configure', (req, res) => {
     `);
 });
 
-// Hàm hỗ trợ giải mã config từ URL
+// Hàm giải mã config từ URL
 function parseConfig(encodedConfig) {
     try {
         return JSON.parse(decodeURIComponent(encodedConfig));
@@ -140,8 +140,8 @@ function parseConfig(encodedConfig) {
 const defaultManifest = {
     id: 'org.ai.subtitle.pro',
     version: '1.0.0',
-    name: 'AI Subtitle Pro (Gemini 3.7)',
-    description: 'Addon phụ đề tự động tiếng Việt với Gemini 3.7 Flash và OpenSubtitles',
+    name: 'AI Subtitle Pro',
+    description: 'Addon phụ đề tự động tiếng Việt với Gemini và OpenSubtitles',
     types: ['movie', 'series'],
     catalogs: [],
     resources: ['subtitles'],
@@ -150,7 +150,7 @@ const defaultManifest = {
     }
 };
 
-// 2. Endpoint xử lý Manifest
+// 2. Endpoint Manifest
 app.get('/:config?/manifest.json', (req, res) => {
     const config = parseConfig(req.params.config);
     const manifest = { ...defaultManifest };
@@ -160,7 +160,7 @@ app.get('/:config?/manifest.json', (req, res) => {
     res.json(manifest);
 });
 
-// 3. Endpoint xử lý Phụ đề (Subtitles) - Tích hợp OpenSubtitles & dịch AI
+// 3. Endpoint Phụ đề (Subtitles) - Đã cô lập lỗi từng nguồn, chống lỗi 500
 app.get('/:config?/subtitles/:type/:id/:extra?.json', async (req, res) => {
     const config = parseConfig(req.params.config) || {};
     const { type, id } = req.params;
@@ -172,9 +172,9 @@ app.get('/:config?/subtitles/:type/:id/:extra?.json', async (req, res) => {
 
     let subtitles = [];
 
+    // --- OPENSUBTITLES ---
     try {
         const opensubtitlesKey = config.opensubtitlesKey || process.env.OPEN_SUBTITLES_API_KEY;
-        
         if (opensubtitlesKey) {
             const osResponse = await axios.get(`https://api.opensubtitles.com/api/v1/subtitles`, {
                 params: {
@@ -186,45 +186,85 @@ app.get('/:config?/subtitles/:type/:id/:extra?.json', async (req, res) => {
                 headers: {
                     'Api-Key': opensubtitlesKey,
                     'User-Agent': 'AiSubtitlePro v1.0.0'
-                }
+                },
+                timeout: 5000
             });
 
             if (osResponse.data && osResponse.data.data) {
                 for (const item of osResponse.data.data) {
                     const subFile = item.attributes.files[0];
                     const lang = item.attributes.language;
-                    
-                    if (lang === 'vi') {
-                        subtitles.push({
-                            id: `vi-${item.id}`,
-                            url: subFile.url,
-                            lang: 'vie',
-                            file_id: subFile.file_id
-                        });
-                    } else if (lang === 'en') {
-                        const modelToUse = config.model || 'gemini-3.7-flash';
-                        const geminiKey = (config.geminiKeys && config.geminiKeys[0]) || process.env.GEMINI_API_KEY;
+                    const fileId = subFile.file_id;
 
-                        if (geminiKey) {
+                    try {
+                        const downloadRes = await axios.post('https://api.opensubtitles.com/api/v1/download', {
+                            file_id: fileId
+                        }, {
+                            headers: {
+                                'Api-Key': opensubtitlesKey,
+                                'User-Agent': 'AiSubtitlePro v1.0.0',
+                                'Content-Type': 'application/json'
+                            },
+                            timeout: 4000
+                        });
+
+                        const realDownloadUrl = downloadRes.data.link;
+                        if (!realDownloadUrl) continue;
+
+                        if (lang === 'vi') {
                             subtitles.push({
-                                id: `ai-vi-${item.id}`,
-                                url: `${req.protocol}://${req.get('host')}/translate-sub?url=${encodeURIComponent(subFile.url)}&key=${encodeURIComponent(geminiKey)}&model=${modelToUse}`,
+                                id: `os-vi-${item.id}`,
+                                url: realDownloadUrl,
                                 lang: 'vie',
-                                file_id: `ai_${subFile.file_id}`
+                                file_id: String(fileId)
                             });
+                        } else if (lang === 'en') {
+                            const modelToUse = config.model || 'gemini-1.5-flash';
+                            const geminiKey = (config.geminiKeys && config.geminiKeys[0]) || process.env.GEMINI_API_KEY;
+
+                            if (geminiKey) {
+                                subtitles.push({
+                                    id: `ai-vi-${item.id}`,
+                                    url: `${req.protocol}://${req.get('host')}/translate-sub?url=${encodeURIComponent(realDownloadUrl)}&key=${encodeURIComponent(geminiKey)}&model=${modelToUse}`,
+                                    lang: 'vie',
+                                    file_id: `ai_${fileId}`
+                                });
+                            }
                         }
+                    } catch (dlErr) {
+                        // Bỏ qua lỗi tải file lẻ tẻ
                     }
                 }
             }
         }
-    } catch (error) {
-        console.error('Lỗi khi lấy phụ đề:', error.message);
+    } catch (osErr) {
+        console.error('OpenSubtitles lỗi (đã bỏ qua):', osErr.message);
+    }
+
+    // --- SUBSOURCE ---
+    try {
+        const subsourceKey = config.subsourceKey || process.env.SUBSOURCE_API_KEY;
+        if (subsourceKey) {
+            // Khung dự phòng Subsource
+        }
+    } catch (subSrcErr) {
+        console.error('Subsource lỗi (đã bỏ qua):', subSrcErr.message);
+    }
+
+    // --- SUBDL ---
+    try {
+        const subdlKey = config.subdlKey || process.env.SUBDL_API_KEY;
+        if (subdlKey) {
+            // Khung dự phòng Subdl
+        }
+    } catch (subDlErr) {
+        console.error('Subdl lỗi (đã bỏ qua):', subDlErr.message);
     }
 
     res.json({ subtitles });
 });
 
-// 4. Endpoint dịch phụ đề bằng Gemini 3.7 Flash
+// 4. Endpoint dịch phụ đề bằng Gemini
 app.get('/translate-sub', async (req, res) => {
     const { url, key, model } = req.query;
     if (!url || !key) return res.status(400).send('Missing parameters');
@@ -233,20 +273,26 @@ app.get('/translate-sub', async (req, res) => {
         const subResponse = await axios.get(url);
         const originalSrt = subResponse.data;
 
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-3.7-flash'}:generateContent?key=${key}`;
+        const modelName = model || 'gemini-1.5-flash';
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
+        
         const prompt = `Bạn là một dịch giả chuyên nghiệp. Hãy dịch toàn bộ nội dung file phụ đề SRT sau đây sang tiếng Việt tự nhiên, giữ nguyên cấu hình thời gian (timestamps) và định dạng số thứ tự của file SRT gốc. Chỉ trả về nội dung SRT đã dịch, không kèm giải thích:\n\n${originalSrt}`;
 
         const aiResponse = await axios.post(geminiUrl, {
             contents: [{ parts: [{ text: prompt }] }]
         });
 
+        if (!aiResponse.data.candidates || !aiResponse.data.candidates[0].content) {
+            throw new Error('Gemini API trả về cấu trúc không hợp lệ.');
+        }
+
         const translatedSrt = aiResponse.data.candidates[0].content.parts[0].text;
 
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.send(translatedSrt);
     } catch (error) {
-        console.error('Lỗi dịch phụ đề Gemini:', error.message);
-        res.status(500).send('Lỗi trong quá trình dịch phụ đề bằng AI.');
+        console.error('Lỗi dịch phụ đề:', error.response?.data || error.message);
+        res.status(500).send(`Lỗi Server: ${error.response?.data?.error?.message || error.message}`);
     }
 });
 
@@ -257,4 +303,3 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`Server đang chạy trên cổng ${PORT}`);
 });
-        
