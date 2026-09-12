@@ -86,7 +86,7 @@ function renderConfigPage(req, res, savedConfig) {
                 <label>Subdl API Key:</label>
                 <input type="text" id="subdlKey" value="${savedConfig.subdlKey || ''}" placeholder="API Key từ subdl.com" />
                 <label>Subsource API Key:</label>
-                <input type="text" id="subsourceKey" value="${savedConfig.subsourceKey || ''}" placeholder="Bearer Token từ subsource.net" />
+                <input type="text" id="subsourceKey" value="${savedConfig.subsourceKey || ''}" placeholder="API Key từ subsource.net" />
 
                 <button type="button" class="btn-install" id="installBtn">Cài đặt trực tiếp vào Nuvio</button>
                 <div class="link-box">
@@ -112,11 +112,11 @@ function renderConfigPage(req, res, savedConfig) {
                 };
                 const encoded = btoa(JSON.stringify(config));
                 const currentUrl = window.location.origin;
-                return \`\${currentUrl}/\${encoded}/manifest.json\`;
+                return `${currentUrl}/${encoded}/manifest.json`;
             }
             document.getElementById('installBtn').addEventListener('click', () => {
                 const addonUrl = getAddonUrl();
-                window.location.href = \`stremio://\${addonUrl.replace(/^https?:\\/\\//, '')}\`;
+                window.location.href = `stremio://${addonUrl.replace(/^https?:\/\//, '')}`;
             });
             document.getElementById('copyBtn').addEventListener('click', () => {
                 const addonUrl = getAddonUrl();
@@ -278,22 +278,22 @@ async function handleSubtitles(req, res, encodedConfig) {
     } catch (e) {}
   }
 
-  // 3. Subsource
-  if (imdbId) {
+  // 3. Subsource (Cập nhật chuẩn theo api.subsource.net/api/v1)
+  if (imdbId && config.subsourceKey) {
     try {
-      const subsourceHeaders = { ...API_HEADERS };
-      if (config.subsourceKey) {
-        subsourceHeaders['Authorization'] = `Bearer ${config.subsourceKey}`;
-      }
-      const subsourceRes = await axios.get(`https://api.subsource.dev/api/subtitles`, {
-        params: { imdb: imdbId, lang: 'vi,en,vie' },
-        headers: subsourceHeaders,
+      const subsourceRes = await axios.get(`https://api.subsource.net/api/v1/subtitles`, {
+        params: { 
+          imdb_id: imdbId, 
+          languages: 'vi,en' 
+        },
+        headers: {
+          'X-API-Key': config.subsourceKey,
+          ...API_HEADERS
+        },
         timeout: 5000
       });
 
-      const subList = Array.isArray(subsourceRes.data) 
-        ? subsourceRes.data 
-        : (subsourceRes.data?.subtitles || subsourceRes.data?.data || []);
+      const subList = subsourceRes.data?.data || subsourceRes.data?.subtitles || [];
 
       if (Array.isArray(subList)) {
         for (const sub of subList.slice(0, 6)) {
@@ -306,14 +306,14 @@ async function handleSubtitles(req, res, encodedConfig) {
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
                 id: `subsource-vi-${sub.id || Math.random()}`,
-                url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(dlUrl)}&provider=subsource&key=${encodeURIComponent(config.subsourceKey || '')}`,
+                url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(dlUrl)}&provider=subsource&key=${encodeURIComponent(config.subsourceKey)}`,
                 lang: 'vie',
                 name: `🇻🇳 [Subsource] ${originalName}`
               });
             } else if (['en', 'eng', 'english'].includes(lang)) {
               subtitles.push({
                 id: `ai-subsource-${sub.id || Math.random()}`,
-                url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${modelToUse}&config=${encodedConfig || ''}&imdbId=${imdbId}&type=${type}&season=${season || ''}&episode=${episode || ''}&provider=subsource&key=${encodeURIComponent(config.subsourceKey || '')}`,
+                url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${modelToUse}&config=${encodedConfig || ''}&imdbId=${imdbId}&type=${type}&season=${season || ''}&episode=${episode || ''}&provider=subsource&key=${encodeURIComponent(config.subsourceKey)}`,
                 lang: 'vie',
                 name: `🤖 AI [${modelToUse}] (Subsource) [⏱️ ~${estTimeStr}]: ${originalName}`
               });
@@ -347,7 +347,7 @@ async function handleSubtitles(req, res, encodedConfig) {
 function getProviderHeaders(provider, key) {
   const headers = { 'User-Agent': 'AISubtitlePro v1.5.9', 'Accept': 'text/plain, */*' };
   if (provider === 'subsource' && key) {
-    headers['Authorization'] = `Bearer ${key}`;
+    headers['X-API-Key'] = key;
   } else if (provider === 'opensubtitles' && key) {
     headers['Api-Key'] = key;
   }
@@ -564,6 +564,6 @@ app.get('/:config/subtitles/:type/:id.json', (req, res) => handleSubtitles(req, 
 app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, res, req.params.config));
 
 app.listen(PORT, () => {
-  console.log(`✅ Server is running on port ${PORT} - SubSource + Subdl đã fix hoàn tất`);
+  console.log(`✅ Server is running on port ${PORT} - Full Subtitle Providers Fixed`);
 });
 
