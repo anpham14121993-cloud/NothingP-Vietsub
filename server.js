@@ -11,7 +11,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.0.0',
+  'User-Agent': 'AISubtitlePro v3.5.0',
   Accept: 'application/json'
 };
 
@@ -65,7 +65,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3</h2>
+<h2>Gemini AI Subtitle Pro v3.5</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -77,6 +77,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 <label>Gemini API Key 1</label><input id="geminiKey1" value="${escapeHtml(geminiKeys[0])}" placeholder="AIzaSy...">
 <label>Gemini API Key 2</label><input id="geminiKey2" value="${escapeHtml(geminiKeys[1])}">
 <label>Gemini API Key 3</label><input id="geminiKey3" value="${escapeHtml(geminiKeys[2])}">
+<div style="font-size:12px;color:#aaa;margin-top:8px;line-height:1.45">v3.5: 3 Key thuộc 3 Google Project khác nhau sẽ chạy 3 worker dịch song song. Mỗi Project có limiter riêng.</div>
 <div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubDL, Subsource)</div>
 <label>OpenSubtitles API Key</label><input id="opensubtitlesKey" value="${escapeHtml(savedConfig.opensubtitlesKey)}">
 <label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
@@ -248,14 +249,37 @@ function cleanAndRebuildSrt(srtText) {
   return entries.map((e, index) => `${index + 1}\n${e.start} --> ${e.end}\n${e.text}`).join('\n\n') || srtText;
 }
 
-let lastGeminiRequestAt = 0;
-const GEMINI_MIN_INTERVAL_MS = 4500; // ~13.3 requests/minute, below a 15 RPM quota
+// Each API key belongs to its own Google Cloud project. Keep a separate
+// request-start limiter per key so 3 independent projects can work in parallel.
+// Requests on the same key are serialized to avoid bursts across simultaneous
+// subtitle jobs.
+const GEMINI_MIN_INTERVAL_MS = 4500; // ~13.3 request starts/minute per project
+const geminiKeyState = new Map();
 
-async function waitForGeminiSlot() {
-  const now = Date.now();
-  const waitMs = Math.max(0, GEMINI_MIN_INTERVAL_MS - (now - lastGeminiRequestAt));
-  if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
-  lastGeminiRequestAt = Date.now();
+function getGeminiKeyState(key) {
+  if (!geminiKeyState.has(key)) {
+    geminiKeyState.set(key, { lastRequestAt: 0, queue: Promise.resolve() });
+  }
+  return geminiKeyState.get(key);
+}
+
+async function withGeminiKeySlot(key, fn) {
+  const state = getGeminiKeyState(key);
+  let release;
+  const next = new Promise(resolve => { release = resolve; });
+  const previous = state.queue;
+  state.queue = previous.then(() => next);
+
+  await previous;
+  try {
+    const now = Date.now();
+    const waitMs = Math.max(0, GEMINI_MIN_INTERVAL_MS - (now - state.lastRequestAt));
+    if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+    state.lastRequestAt = Date.now();
+    return await fn();
+  } finally {
+    release();
+  }
 }
 
 async function callAI(prompt, geminiKeys, model) {
@@ -277,16 +301,17 @@ async function callAI(prompt, geminiKeys, model) {
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          await waitForGeminiSlot();
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`;
-          const response = await axios.post(url, {
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.2
-            }
-          }, {
-            timeout: 90000,
-            headers: { 'Content-Type': 'application/json' }
+          const response = await withGeminiKeySlot(key, async () => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`;
+            return axios.post(url, {
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.2
+              }
+            }, {
+              timeout: 90000,
+              headers: { 'Content-Type': 'application/json' }
+            });
           });
 
           const result = response.data?.candidates?.[0]?.content?.parts
@@ -335,6 +360,13 @@ async function callAI(prompt, geminiKeys, model) {
   return { result: '', error: lastError };
 }
 
+
+// Pin an AI call to exactly one API key/project. v3.5 uses this for the
+// 3 translation workers so each worker stays on its assigned project.
+async function callAIWithKey(prompt, key, model) {
+  if (!key) return { result: '', error: 'Thiếu Gemini API Key.' };
+  return callAI(prompt, [key], model);
+}
 
 function stripMarkdownCodeFence(value) {
   return String(value || '')
@@ -855,7 +887,8 @@ app.get('/translate-sub', async (req, res) => {
       relationshipGuide = await buildCharacterRelationshipGuide({
         movieContext,
         subtitleSample,
-        geminiKeys,
+        // One-time guide call on project/key #1.
+        geminiKeys: [geminiKeys[0]],
         model: selectedModel
       });
     } catch (err) {
@@ -881,7 +914,7 @@ Không có sổ tay quan hệ đáng tin cậy. Hãy suy luận thận trọng t
     // themselves take longer than the 4.5s global request-start interval.
     // The limiter in callAI() still guarantees that Gemini request starts are
     // spaced at least 4.5s apart, so we do not create a >15 RPM burst.
-    const translateChunk = async (i) => {
+    const translateChunk = async (i, workerKey) => {
       const prompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
 MỤC TIÊU:
@@ -906,7 +939,7 @@ NGUYÊN TẮC XƯNG HÔ:
 SRT CẦN DỊCH:
 ${chunks[i]}`;
 
-      const aiRes = await callAI(prompt, geminiKeys, selectedModel);
+      const aiRes = await callAIWithKey(prompt, workerKey, selectedModel);
 
       if (!aiRes.result) {
         console.error(`[Gemini translation chunk ${i + 1}/${chunks.length}]`, aiRes.error);
@@ -925,19 +958,18 @@ ${chunks[i]}`;
       });
     };
 
-    // Keep at most two translation requests in flight. callAI()'s global
-    // limiter controls their start rate; this only prevents one slow request
-    // from forcing every later chunk to wait for its completion.
-    let nextChunkIndex = 0;
-    const worker = async () => {
-      while (true) {
-        const i = nextChunkIndex++;
-        if (i >= chunks.length) return;
-        await translateChunk(i);
+    // One worker per independent Google project/key.
+    // With 3 keys: worker #1 -> chunks 0,3,6...; #2 -> 1,4,7...;
+    // #3 -> 2,5,8... . Each key has its own limiter and queue.
+    const workerKeys = geminiKeys.slice(0, 3);
+    const worker = async (workerIndex, workerKey) => {
+      for (let i = workerIndex; i < chunks.length; i += workerKeys.length) {
+        await translateChunk(i, workerKey);
       }
     };
-    await Promise.all([worker(), worker()]);
+    await Promise.all(workerKeys.map((key, index) => worker(index, key)));
 
+    // Workers finish out of order; restore the original SRT chunk order.
     translated.sort((a, b) => a.index - b.index);
     const finalSrt = cleanAndRebuildSrt(translated.map(t => t.text).join('\n\n'));
     setCachedTranslation(cacheKey, finalSrt);
@@ -963,3 +995,4 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
   console.log(`Gemini AI Subtitle Pro đang chạy tại port ${PORT}`);
 });
+
