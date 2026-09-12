@@ -135,12 +135,16 @@ function makeHostUrl(req) {
 }
 
 function languageCode(value) {
+  if (value && typeof value === 'object') {
+    value = value.code || value.iso639_2 || value.iso639_1 || value.name || value.language || '';
+  }
   return String(value || '').trim().toLowerCase();
 }
 
 function isVietnamese(value) {
   const code = languageCode(value);
-  return code === 'vi' || code === 'vie' || code === 'vnm' || code === 'vn' || code.startsWith('vi') || code.includes('viet');
+  return ['vi', 'vie', 'vnm', 'vn', 'vietnamese', 'vietnam'].includes(code) ||
+    code.startsWith('vi-') || code.startsWith('vi_') || code.includes('viet');
 }
 
 function isEnglish(value) {
@@ -318,7 +322,9 @@ async function handleSubtitles(req, res, encodedConfig) {
         });
       }
     }
-  } catch (err) {}
+  } catch (err) {
+    console.error('[OpenSubtitles]', err.response?.status || '', err.response?.data || err.message);
+  }
 
   // 2. Quét SubDL
   try {
@@ -359,7 +365,9 @@ async function handleSubtitles(req, res, encodedConfig) {
         }
       }
     }
-  } catch (err) {}
+  } catch (err) {
+    console.error('[SubDL]', err.response?.status || '', err.response?.data || err.message);
+  }
 
   // 3. Quét SubSource API
   try {
@@ -422,12 +430,14 @@ async function handleSubtitles(req, res, encodedConfig) {
           if (!vietnameseSubs.length) {
             vietnameseSubs = await getSubsourceSubs('vie').catch(() => []);
           }
-          vietnameseSubs = vietnameseSubs.filter(sub => isVietnamese(sub.language));
+          vietnameseSubs = vietnameseSubs.filter(sub =>
+            isVietnamese(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang)
+          );
 
           let englishSubs = [];
           if (!vietnameseSubs.length) {
             englishSubs = (await getSubsourceSubs('english').catch(() => []))
-              .filter(sub => isEnglish(sub.language));
+              .filter(sub => isEnglish(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang));
           }
 
           const selectedSubs = (vietnameseSubs.length ? vietnameseSubs : englishSubs).slice(0, 6);
@@ -443,14 +453,15 @@ async function handleSubtitles(req, res, encodedConfig) {
               `${hostUrl}/subsource-sub/${encodeURIComponent(sub.subtitleId)}` +
               `?key=${encodeURIComponent(config.subsourceKey)}`;
 
-            if (isVietnamese(sub.language)) {
+            const subLanguage = sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang;
+            if (isVietnamese(subLanguage)) {
               nativeVietSubtitles.push({
                 id: `subsource-vi-${sub.subtitleId}`,
                 url: downloadUrl,
                 lang: 'vie',
                 name: `🇻🇳 [Tiếng Việt] ${releaseName}`
               });
-            } else if (isEnglish(sub.language)) {
+            } else if (isEnglish(subLanguage)) {
               englishSubtitlesForAI.push({
                 id: `ai-subsource-${sub.subtitleId}`,
                 url:
@@ -609,4 +620,3 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
   console.log(`Gemini AI Subtitle Pro đang chạy tại port ${PORT}`);
 });
-
