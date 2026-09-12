@@ -11,7 +11,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.5.0',
+  'User-Agent': 'AISubtitlePro v3.6.0',
   Accept: 'application/json'
 };
 
@@ -65,11 +65,11 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.5</h2>
+<h2>Gemini AI Subtitle Pro v3.7</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
-<option value="gemini-3.6-flash" ${savedConfig.model === 'gemini-3.6-flash' || !savedConfig.model ? 'selected' : ''}>Gemini 3.6 Flash (Khuyên dùng)</option>
+<option value="gemini-3.6-flash" ${savedConfig.model === 'gemini-3.6-flash' || !savedConfig.model ? 'selected' : ''}>Gemini 3.6 Flash - Low thinking (Khuyên dùng)</option>
 <option value="gemini-3.5-flash-lite" ${savedConfig.model === 'gemini-3.5-flash-lite' ? 'selected' : ''}>Gemini 3.5 Flash-Lite</option>
 <option value="gemini-2.5-flash" ${savedConfig.model === 'gemini-2.5-flash' ? 'selected' : ''}>Gemini 2.5 Flash (Dự phòng)</option>
 </select>
@@ -115,7 +115,7 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.0.0',
+  version: '3.7.0',
   name: 'Gemini AI Subtitle Pro',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -137,7 +137,8 @@ function makeHostUrl(req) {
 
 function languageCode(value) {
   if (value && typeof value === 'object') {
-    value = value.code || value.iso639_2 || value.iso639_1 || value.name || value.language || '';
+    value = value.code || value.language_code || value.iso639_2 || value.iso639_1 ||
+      value.lang || value.language || value.name || '';
   }
   return String(value || '').trim().toLowerCase();
 }
@@ -175,7 +176,7 @@ function extractSubtitleText(buffer) {
   return selected.getData().toString('utf8').replace(/^\uFEFF/, '');
 }
 
-async function fetchSubtitleText(url, headers = {}, timeout = 20000) {
+async function fetchSubtitleText(url, headers = {}, timeout = 30000) {
   const response = await axios.get(url, { headers, responseType: 'arraybuffer', timeout, maxRedirects: 5 });
   return extractSubtitleText(Buffer.from(response.data));
 }
@@ -306,7 +307,10 @@ async function callAI(prompt, geminiKeys, model) {
             return axios.post(url, {
               contents: [{ parts: [{ text: prompt }] }],
               generationConfig: {
-                temperature: 0.2
+                temperature: 0.2,
+                ...(String(modelName).startsWith('gemini-3.') ? {
+                  thinkingConfig: { thinkingLevel: 'low' }
+                } : {})
               }
             }, {
               timeout: 90000,
@@ -337,12 +341,10 @@ async function callAI(prompt, geminiKeys, model) {
 
           if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(message)) {
             rateLimited = true;
-            if (attempt < 2) {
-              const backoff = 15000 * Math.pow(2, attempt) + Math.floor(Math.random() * 2000);
-              console.warn(`[Gemini ${modelName}] Rate limit, chờ ${Math.round(backoff / 1000)}s rồi thử lại.`);
-              await new Promise(r => setTimeout(r, backoff));
-              continue;
-            }
+            // Do not sleep 15-60s inside a Stremio subtitle request.
+            // With 3 independent projects, another worker/key can continue.
+            console.warn(`[Gemini ${modelName}] Rate limit/quota: fail fast for this key.`);
+            break;
           }
 
           break;
@@ -486,118 +488,184 @@ async function handleSubtitles(req, res, encodedConfig) {
   let nativeVietSubtitles = [];
   let englishSubtitlesForAI = [];
 
-  // 1. Quét OpenSubtitles
-  try {
-    const osParams = { languages: 'vi,en,vie' };
-    if (imdbId.startsWith('tt')) osParams.imdb_id = imdbId.replace(/^tt/, '');
-    if (type === 'series' && season !== null && episode !== null) {
-      osParams.season_number = season;
-      osParams.episode_number = episode;
-    }
+  // ============================================================
+  // 1/2/3. QUÉT 3 NGUỒN SONG SONG
+  // OpenSubtitles, SubDL và SubSource được chạy đồng thời.
+  // Mỗi nguồn tự bắt lỗi riêng để một nguồn lỗi không chặn 2 nguồn còn lại.
+  // ============================================================
 
-    const apiKeyOS = config.opensubtitlesKey || '2015';
-    const osRes = await axios.get('https://api.opensubtitles.com/api/v1/subtitles', {
-      params: osParams,
-      headers: { 'Api-Key': apiKeyOS, ...API_HEADERS },
-      timeout: 7000
-    });
+  const fetchOpenSubtitles = async () => {
+    const native = [];
+    const ai = [];
+    try {
+      const apiKeyOS = config.opensubtitlesKey || '2015';
+      const baseParams = {};
+      if (imdbId.startsWith('tt')) baseParams.imdb_id = imdbId.replace(/^tt/, '');
+      if (type === 'series' && season !== null && episode !== null) {
+        baseParams.season_number = season;
+        baseParams.episode_number = episode;
+      }
 
-    // IMPORTANT: filter by language BEFORE limiting results.
-    // OpenSubtitles can return non-Vietnamese tracks first even when the
-    // request asks for vi/en; slicing first could hide a valid Vietnamese sub.
-    const osItems = osRes.data?.data || [];
-    const osVi = osItems.filter(item => isVietnamese(item.attributes?.language || ''));
-    const osEn = osItems.filter(item => isEnglish(item.attributes?.language || ''));
-    const osSelected = [...osVi.slice(0, 6), ...osEn.slice(0, 6)];
+      const searchOS = async languages => {
+        const r = await axios.get('https://api.opensubtitles.com/api/v1/subtitles', {
+          params: { ...baseParams, languages },
+          headers: { 'Api-Key': apiKeyOS, ...API_HEADERS },
+          timeout: 7000
+        });
+        return Array.isArray(r.data?.data) ? r.data.data : [];
+      };
 
-    for (const item of osSelected) {
-      const file = item.attributes?.files?.[0];
-      const lang = item.attributes?.language || '';
-      if (!file?.file_id) continue;
+      const [osViResult, osEnResult] = await Promise.allSettled([
+        searchOS('vi'),
+        searchOS('en')
+      ]);
+      const osVi = osViResult.status === 'fulfilled' ? osViResult.value : [];
+      const osEn = osEnResult.status === 'fulfilled' ? osEnResult.value : [];
+      const osSelected = [
+        ...osVi.filter(item => isVietnamese(item.attributes?.language || '')).slice(0, 6),
+        ...osEn.filter(item => isEnglish(item.attributes?.language || '')).slice(0, 6)
+      ];
 
-      const download = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: file.file_id }, {
-        headers: { 'Api-Key': apiKeyOS, ...API_HEADERS, 'Content-Type': 'application/json' },
-        timeout: 7000
-      }).catch(() => null);
+      const osMapped = await Promise.allSettled(osSelected.map(async item => {
+        const file = (item.attributes?.files || []).find(f => f?.file_id) || item.attributes?.files?.[0];
+        const lang = item.attributes?.language || '';
+        if (!file?.file_id) return null;
 
-      if (!download?.data?.link) continue;
-      const releaseName = item.attributes?.release || file.file_name || 'OpenSubtitles Sub';
+        const download = await axios.post(
+          'https://api.opensubtitles.com/api/v1/download',
+          { file_id: file.file_id },
+          {
+            headers: { 'Api-Key': apiKeyOS, ...API_HEADERS, 'Content-Type': 'application/json' },
+            timeout: 7000
+          }
+        );
+        if (!download?.data?.link) return null;
 
-      if (isVietnamese(lang)) {
-        nativeVietSubtitles.push({
+        const releaseName = item.attributes?.release || file.file_name || 'OpenSubtitles Sub';
+        const isVi = isVietnamese(lang);
+        return isVi ? {
           id: `os-vi-${item.id}`,
           url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(download.data.link)}`,
           lang: 'vie',
           name: `🇻🇳 [Tiếng Việt] ${releaseName}`
-        });
-      } else if (isEnglish(lang)) {
-        englishSubtitlesForAI.push({
+        } : {
           id: `ai-os-${item.id}`,
           url: `${hostUrl}/translate-sub?url=${encodeURIComponent(download.data.link)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
-          lang: 'eng',
-          name: `🇬🇧 [English → Gemini AI khi chọn]\n${releaseName}`
-        });
+          lang: 'vie',
+          name: `🇻🇳 [Gemini AI] ${releaseName}`,
+          ai: true
+        };
+      }));
+
+      for (const r of osMapped) {
+        if (r.status !== 'fulfilled' || !r.value) continue;
+        if (r.value.ai) ai.push(r.value);
+        else native.push(r.value);
       }
+    } catch (err) {
+      console.error('[OpenSubtitles]', err.response?.status || '', err.response?.data || err.message);
     }
-  } catch (err) {
-    console.error('[OpenSubtitles]', err.response?.status || '', err.response?.data || err.message);
-  }
+    return { native, ai };
+  };
 
-  // 2. Quét SubDL
-  try {
-    if (imdbId) {
-      const subdlRes = await axios.get('https://api.subdl.com/api/v1/subtitles', {
-        params: {
-          api_key: config.subdlKey || '',
-          imdb_id: imdbId,
-          type: type === 'series' ? 'tv' : 'movie',
-          languages: 'VI,EN',
-          season: season,
-          episode: episode,
-          unpack: 1
-        },
-        timeout: 7000
-      });
+  const fetchSubDL = async () => {
+    const native = [];
+    const ai = [];
+    try {
+      if (!imdbId || !config.subdlKey) return { native, ai };
 
-      // IMPORTANT: filter by language BEFORE limiting results for the same
-      // reason as OpenSubtitles above.
-      const subdlItems = subdlRes.data?.subtitles || [];
-      const subdlVi = subdlItems.filter(sub => isVietnamese(sub.language || ''));
-      const subdlEn = subdlItems.filter(sub => isEnglish(sub.language || ''));
-      const subdlSelected = [...subdlVi.slice(0, 6), ...subdlEn.slice(0, 6)];
+      const apiKeySubDL = config.subdlKey;
+      const searchSubDL = async languages => {
+        const r = await axios.get('https://api.subdl.com/api/v1/subtitles', {
+          params: {
+            api_key: apiKeySubDL,
+            imdb_id: imdbId,
+            type: type === 'series' ? 'tv' : 'movie',
+            languages,
+            season: season,
+            episode: episode,
+            unpack: 1
+          },
+          timeout: 7000
+        });
+        return Array.isArray(r.data?.subtitles) ? r.data.subtitles : [];
+      };
 
-      for (const sub of subdlSelected) {
-        const lang = sub.language || '';
-        if (!sub.url) continue;
-        const dlUrl = sub.url.startsWith('http') ? sub.url : `https://dl.subdl.com${sub.url}`;
+      const [viResult, enResult] = await Promise.allSettled([
+        searchSubDL('VI'),
+        searchSubDL('EN')
+      ]);
+      const viPacks = viResult.status === 'fulfilled' ? viResult.value : [];
+      const enPacks = enResult.status === 'fulfilled' ? enResult.value : [];
+
+      const flatten = (packs, wantedLang) => {
+        const out = [];
+        for (const sub of packs) {
+          const files = Array.isArray(sub.unpack_files) && sub.unpack_files.length
+            ? sub.unpack_files
+            : [sub];
+          for (const f of files) {
+            const lang = f.language || sub.language || f.lang || sub.lang || '';
+            if (!((wantedLang === 'vi' && isVietnamese(lang)) || (wantedLang === 'en' && isEnglish(lang)))) continue;
+            const fileUrl = f.url || sub.url;
+            if (!fileUrl) continue;
+            out.push({
+              ...sub,
+              ...f,
+              language: lang,
+              url: fileUrl,
+              release_name: f.release_name || sub.release_name || f.name || sub.name
+            });
+          }
+        }
+        return out;
+      };
+
+      const subdlVi = flatten(viPacks, 'vi').slice(0, 6);
+      const subdlEn = flatten(enPacks, 'en').slice(0, 6);
+      const mapped = [
+        ...subdlVi.map(sub => ({ sub, vi: true })),
+        ...subdlEn.map(sub => ({ sub, vi: false }))
+      ];
+
+      for (const { sub, vi } of mapped) {
+        const lang = sub.language || sub.lang || '';
+        const rawUrl = sub.url;
+        if (!rawUrl) continue;
+        const dlUrl = rawUrl.startsWith('http') ? rawUrl : `https://dl.subdl.com${rawUrl}`;
         const releaseName = subtitleName(sub, 'SubDL Sub');
+        const idPart = sub.file_n_id || sub.n_id || sub.nId || sub.id || Math.random().toString(36).slice(2);
 
-        if (isVietnamese(lang)) {
-          nativeVietSubtitles.push({
-            id: `subdl-vi-${sub.n_id || sub.id}`,
+        if (vi && isVietnamese(lang)) {
+          native.push({
+            id: `subdl-vi-${idPart}`,
             url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(dlUrl)}`,
             lang: 'vie',
             name: `🇻🇳 [Tiếng Việt] ${releaseName}`
           });
-        } else if (isEnglish(lang)) {
-          englishSubtitlesForAI.push({
-            id: `ai-subdl-${sub.n_id || sub.id}`,
+        } else if (!vi && isEnglish(lang)) {
+          ai.push({
+            id: `ai-subdl-${idPart}`,
             url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
-            lang: 'eng',
-            name: `🇬🇧 [English → Gemini AI khi chọn]\n${releaseName}`
+            lang: 'vie',
+            name: `🇻🇳 [Gemini AI] ${releaseName}`,
+            ai: true
           });
         }
       }
+    } catch (err) {
+      console.error('[SubDL]', err.response?.status || '', err.response?.data || err.message);
     }
-  } catch (err) {
-    console.error('[SubDL]', err.response?.status || '', err.response?.data || err.message);
-  }
+    return { native, ai };
+  };
 
-  // 3. Quét SubSource API
-  try {
-    if (imdbId && config.subsourceKey) {
+  const fetchSubSource = async () => {
+    const native = [];
+    const ai = [];
+    try {
+      if (!imdbId || !config.subsourceKey) return { native, ai };
+
       let movieTitle = '';
-
       try {
         const metaRes = await axios.get(
           `https://v3-cinemeta.strem.io/meta/${type === 'series' ? 'series' : 'movie'}/${encodeURIComponent(imdbId)}.json`,
@@ -608,107 +676,127 @@ async function handleSubtitles(req, res, encodedConfig) {
         console.error('[SubSource Cinemeta]', err.message);
       }
 
-      if (movieTitle) {
-        const searchRes = await axios.get(`${SUBSOURCE_API}/movies/search`, {
+      if (!movieTitle) return { native, ai };
+
+      const searchRes = await axios.get(`${SUBSOURCE_API}/movies/search`, {
+        params: {
+          searchType: 'text',
+          q: movieTitle,
+          ...(type === 'series' && season !== null ? { season } : {})
+        },
+        headers: getSubsourceHeaders(config.subsourceKey),
+        timeout: 10000
+      });
+
+      const searchResults = Array.isArray(searchRes.data?.data) ? searchRes.data.data : [];
+      const matchedMovie = searchResults.find(movie =>
+        String(movie.imdbId || '').replace(/^tt/i, '') === String(imdbId).replace(/^tt/i, '') &&
+        (type !== 'series' || season === null || movie.season == null || Number(movie.season) === season)
+      );
+
+      if (!matchedMovie?.movieId) return { native, ai };
+
+      const getSubsourceSubs = async language => {
+        const response = await axios.get(`${SUBSOURCE_API}/subtitles`, {
           params: {
-            searchType: 'text',
-            q: movieTitle,
-            ...(type === 'series' && season !== null ? { season } : {})
+            movieId: matchedMovie.movieId,
+            language,
+            page: 1,
+            limit: 100,
+            sort: 'rating'
           },
           headers: getSubsourceHeaders(config.subsourceKey),
           timeout: 10000
         });
+        return Array.isArray(response.data?.data) ? response.data.data : [];
+      };
 
-        const searchResults = Array.isArray(searchRes.data?.data)
-          ? searchRes.data.data
-          : [];
+      // Once the movie is identified, VI/EN subtitle searches are also parallel.
+      let [viPrimary, viFallback, english] = await Promise.all([
+        getSubsourceSubs('vi').catch(() => []),
+        getSubsourceSubs('vie').catch(() => []),
+        getSubsourceSubs('english').catch(() => [])
+      ]);
 
-        const matchedMovie = searchResults.find(movie =>
-          String(movie.imdbId || '').replace(/^tt/i, '') ===
-          String(imdbId).replace(/^tt/i, '') &&
-          (
-            type !== 'series' ||
-            season === null ||
-            movie.season == null ||
-            Number(movie.season) === season
-          )
-        );
+      let vietnameseSubs = [...viPrimary, ...viFallback]
+        .filter(sub => isVietnamese(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang));
+      let englishSubs = english
+        .filter(sub => isEnglish(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang));
 
-        if (matchedMovie?.movieId) {
-          const getSubsourceSubs = async language => {
-            const response = await axios.get(`${SUBSOURCE_API}/subtitles`, {
-              params: {
-                movieId: matchedMovie.movieId,
-                language,
-                page: 1,
-                limit: 100,
-                sort: 'rating'
-              },
-              headers: getSubsourceHeaders(config.subsourceKey),
-              timeout: 10000
-            });
-            return Array.isArray(response.data?.data) ? response.data.data : [];
-          };
+      // Prefer native Vietnamese. If none exists, expose English for Gemini AI.
+      const selectedSubs = (vietnameseSubs.length ? vietnameseSubs : englishSubs).slice(0, 6);
 
-          let vietnameseSubs = await getSubsourceSubs('vi').catch(() => []);
-          if (!vietnameseSubs.length) {
-            vietnameseSubs = await getSubsourceSubs('vie').catch(() => []);
-          }
-          vietnameseSubs = vietnameseSubs.filter(sub =>
-            isVietnamese(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang)
-          );
+      for (const sub of selectedSubs) {
+        if (!sub.subtitleId) continue;
+        const releaseName = Array.isArray(sub.releaseInfo)
+          ? sub.releaseInfo.join(' ')
+          : (sub.releaseInfo || sub.productionType || 'SubSource');
+        const downloadUrl =
+          `${hostUrl}/subsource-sub/${encodeURIComponent(sub.subtitleId)}` +
+          `?key=${encodeURIComponent(config.subsourceKey)}`;
+        const subLanguage = sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang;
 
-          let englishSubs = [];
-          if (!vietnameseSubs.length) {
-            englishSubs = (await getSubsourceSubs('english').catch(() => []))
-              .filter(sub => isEnglish(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang));
-          }
-
-          const selectedSubs = (vietnameseSubs.length ? vietnameseSubs : englishSubs).slice(0, 6);
-
-          for (const sub of selectedSubs) {
-            if (!sub.subtitleId) continue;
-
-            const releaseName = Array.isArray(sub.releaseInfo)
-              ? sub.releaseInfo.join(' ')
-              : (sub.releaseInfo || sub.productionType || 'SubSource');
-
-            const downloadUrl =
-              `${hostUrl}/subsource-sub/${encodeURIComponent(sub.subtitleId)}` +
-              `?key=${encodeURIComponent(config.subsourceKey)}`;
-
-            const subLanguage = sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang;
-            if (isVietnamese(subLanguage)) {
-              nativeVietSubtitles.push({
-                id: `subsource-vi-${sub.subtitleId}`,
-                url: downloadUrl,
-                lang: 'vie',
-                name: `🇻🇳 [Tiếng Việt] ${releaseName}`
-              });
-            } else if (isEnglish(subLanguage)) {
-              englishSubtitlesForAI.push({
-                id: `ai-subsource-${sub.subtitleId}`,
-                url:
-                  `${hostUrl}/translate-sub?url=${encodeURIComponent(downloadUrl)}` +
-                  `&model=${encodeURIComponent(modelToUse)}` +
-                  `&config=${encodeURIComponent(encodedConfig || '')}` +
-                  `&imdbId=${encodeURIComponent(imdbId)}` +
-                  `&type=${encodeURIComponent(type)}` +
-                  `&season=${season || ''}&episode=${episode || ''}`,
-                lang: 'eng',
-                name: `🇬🇧 [English → Gemini AI khi chọn]\n${releaseName}`
-              });
-            }
-          }
+        if (isVietnamese(subLanguage)) {
+          native.push({
+            id: `subsource-vi-${sub.subtitleId}`,
+            url: downloadUrl,
+            lang: 'vie',
+            name: `🇻🇳 [Tiếng Việt] ${releaseName}`
+          });
+        } else if (isEnglish(subLanguage)) {
+          ai.push({
+            id: `ai-subsource-${sub.subtitleId}`,
+            url:
+              `${hostUrl}/translate-sub?url=${encodeURIComponent(downloadUrl)}` +
+              `&model=${encodeURIComponent(modelToUse)}` +
+              `&config=${encodeURIComponent(encodedConfig || '')}` +
+              `&imdbId=${encodeURIComponent(imdbId)}` +
+              `&type=${encodeURIComponent(type)}` +
+              `&season=${season || ''}&episode=${episode || ''}`,
+            lang: 'vie',
+            name: `🇻🇳 [Gemini AI] ${releaseName}`,
+            ai: true
+          });
         }
       }
+    } catch (err) {
+      console.error('[SubSource]', err.response?.status || '', err.response?.data || err.message);
     }
-  } catch (err) {
-    console.error('[SubSource]', err.response?.status || '', err.response?.data || err.message);
+    return { native, ai };
+  };
+
+  const [osResult, subdlResult, subsourceResult] = await Promise.allSettled([
+    fetchOpenSubtitles(),
+    fetchSubDL(),
+    fetchSubSource()
+  ]);
+
+  for (const result of [osResult, subdlResult, subsourceResult]) {
+    if (result.status !== 'fulfilled' || !result.value) continue;
+    nativeVietSubtitles.push(...result.value.native);
+    englishSubtitlesForAI.push(...result.value.ai);
   }
 
+  console.log(
+    '[Subtitles parallel]',
+    `OS=${osResult.status}`,
+    `SubDL=${subdlResult.status}`,
+    `SubSource=${subsourceResult.status}`,
+    `VI=${nativeVietSubtitles.length}`,
+    `AI=${englishSubtitlesForAI.length}`
+  );
 
   let subtitles = [...nativeVietSubtitles, ...englishSubtitlesForAI];
+
+  // Prewarm the first AI subtitle in the background. Stremio gets the
+  // subtitle list immediately, while Gemini translation starts before the
+  // user taps the track. This is the main protection against client timeout.
+  const firstAI = subtitles.find(s => s.ai && s.url);
+  if (firstAI) {
+    axios.get(firstAI.url, { timeout: 120000 }).catch(err => {
+      console.warn('[AI prewarm]', err.message);
+    });
+  }
 
   res.json({ subtitles });
 }
@@ -740,6 +828,35 @@ app.get('/proxy-sub', async (req, res) => {
   } catch (err) {
     res.status(502).send('Không thể tải phụ đề gốc.');
   }
+});
+
+app.get('/ai-test-all', async (req, res) => {
+  const config = parseConfig(req.query.config || '');
+  const geminiKeys = (config.geminiKeys && config.geminiKeys.length > 0)
+    ? config.geminiKeys
+    : [process.env.GEMINI_API_KEY].filter(Boolean);
+  const requestedModel = req.query.model || config.model || 'gemini-3.6-flash';
+
+  if (!geminiKeys.length) {
+    return res.json({ ok: false, error: 'Chưa có Gemini API Key', keys: [] });
+  }
+
+  const results = await Promise.all(geminiKeys.slice(0, 3).map(async (key, index) => {
+    const r = await callAIWithKey(
+      'Trả lời đúng một câu: Gemini worker hoạt động bình thường.',
+      key,
+      requestedModel
+    );
+    return {
+      worker: index + 1,
+      keyHint: `${String(key).slice(0, 6)}...${String(key).slice(-4)}`,
+      ok: !!r.result,
+      modelUsed: r.model || null,
+      error: r.error || null
+    };
+  }));
+
+  res.json({ ok: results.every(r => r.ok), modelRequested: requestedModel, workers: results });
 });
 
 app.get('/ai-test', async (req, res) => {
@@ -779,6 +896,7 @@ app.get('/ai-test', async (req, res) => {
 const translatedSubtitleCache = new Map();
 const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TRANSLATION_CACHE_MAX = 40;
+const translationInFlight = new Map();
 
 function makeTranslationCacheKey({ url, model, imdbId, type, season, episode }) {
   return [url, model || '', imdbId || '', type || '', season || '', episode || ''].join('|');
@@ -828,6 +946,31 @@ app.get('/translate-sub', async (req, res) => {
       return res.send(cachedSrt);
     }
 
+    // If Stremio requests the same subtitle URL twice while the first one is
+    // still translating, let the second request wait for the same job instead
+    // of starting another 3-project Gemini translation.
+    const existingJob = translationInFlight.get(cacheKey);
+    if (existingJob) {
+      try {
+        const readySrt = await existingJob;
+        res.setHeader('Cache-Control', 'public, max-age=21600');
+        return res.send(readySrt);
+      } catch (err) {
+        return res.send(
+          '1\n00:00:01,000 --> 00:00:10,000\n[Gemini AI] Không thể dịch phụ đề: ' +
+          String(err.message || err).replace(/\\r?\\n/g, ' ')
+        );
+      }
+    }
+
+    let releaseJob;
+    let rejectJob;
+    const currentJob = new Promise((resolve, reject) => {
+      releaseJob = resolve;
+      rejectJob = reject;
+    });
+    translationInFlight.set(cacheKey, currentJob);
+
     let originalSrt;
     try {
       const subsourceMatch = String(url).match(
@@ -843,7 +986,7 @@ app.get('/translate-sub', async (req, res) => {
         originalSrt = await fetchSubtitleText(url);
       }
     } catch (err) {
-      return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI]: Không tải được file phụ đề tiếng Anh.');
+      throw new Error('Không tải được file phụ đề tiếng Anh.');
     }
 
     let movieContext = 'Phim điện ảnh/truyền hình tổng quát. Chưa có metadata từ Cinemeta.';
@@ -907,13 +1050,13 @@ ${relationshipGuide}
 Không có sổ tay quan hệ đáng tin cậy. Hãy suy luận thận trọng từ chính đoạn thoại và bối cảnh, không tự bịa quan hệ.
 `;
 
-    const chunks = splitSrtIntoChunks(originalSrt, 12000);
+    const chunks = splitSrtIntoChunks(originalSrt, 8000);
     const translated = [];
 
-    // Two workers are enough to reduce wall-clock time when Gemini responses
+    // Three workers use the three independent Google projects to reduce wall-clock time
     // themselves take longer than the 4.5s global request-start interval.
     // The limiter in callAI() still guarantees that Gemini request starts are
-    // spaced at least 4.5s apart, so we do not create a >15 RPM burst.
+    // spaced at least 4.5s apart per project, so each project stays around 13 RPM.
     const translateChunk = async (i, workerKey) => {
       const prompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
@@ -973,10 +1116,13 @@ ${chunks[i]}`;
     translated.sort((a, b) => a.index - b.index);
     const finalSrt = cleanAndRebuildSrt(translated.map(t => t.text).join('\n\n'));
     setCachedTranslation(cacheKey, finalSrt);
+    releaseJob(finalSrt);
     res.setHeader('Cache-Control', 'public, max-age=21600');
     return res.send(finalSrt);
 
   } catch (err) {
+    if (rejectJob) rejectJob(err);
+
     console.error('[translate-sub]', err.stack || err.message || err);
 
     return res.send(
@@ -984,6 +1130,8 @@ ${chunks[i]}`;
       '[Gemini AI] Không thể dịch phụ đề: ' +
       String(err.message || err).replace(/\\r?\\n/g, ' ')
     );
+  } finally {
+    translationInFlight.delete(cacheKey);
   }
 });
 
