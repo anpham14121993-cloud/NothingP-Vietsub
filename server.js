@@ -170,7 +170,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   
   const estTimeStr = type === 'series' ? '15-20s' : '25-35s';
 
-  // 1. OpenSubtitles
+  // 1. OpenSubtitles (không đổi)
   if (config.opensubtitlesKey) {
     try {
       const osParams = { languages: 'vi,en,vie' };
@@ -206,14 +206,14 @@ async function handleSubtitles(req, res, encodedConfig) {
                 id: `os-vi-${item.id}`,
                 url: `\( {hostUrl}/proxy-sub?url= \){encodeURIComponent(realDownloadUrl)}&provider=opensubtitles&key=${encodeURIComponent(config.opensubtitlesKey)}`,
                 lang: 'vie',
-                name: `🇻🇳 [OpenSubtitles] ${originalName}`
+                name: `🇵🇭 [OpenSubtitles] ${originalName}`
               });
             } else if (['en', 'eng', 'english'].includes(lang)) {
               subtitles.push({
                 id: `ai-os-${item.id}`,
                 url: `\( {hostUrl}/translate-sub?url= \){encodeURIComponent(realDownloadUrl)}&model=\( {modelToUse}&config= \){encodedConfig || ''}&imdbId=\( {imdbId}&type= \){type}&season=\( {season || ''}&episode= \){episode || ''}&provider=opensubtitles&key=${encodeURIComponent(config.opensubtitlesKey)}`,
                 lang: 'vie',
-                name: `🤖 AI [\( {modelToUse}] (OpenSubtitles) [⏱️ Dự kiến \~ \){estTimeStr}]: ${originalName}`
+                name: `🤖 AI [\( {modelToUse}] (OpenSubtitles) [⏱️ \~ \){estTimeStr}]: ${originalName}`
               });
             }
           } catch (errDl) {}
@@ -222,7 +222,7 @@ async function handleSubtitles(req, res, encodedConfig) {
     } catch (e) {}
   }
 
-  // 2. Subdl (API v2 mới nhất - dùng Bearer + unpack=1)
+  // 2. Subdl (API v2 mới nhất)
   if (config.subdlKey && imdbId) {
     try {
       const subdlRes = await axios.get(`https://api.subdl.com/api/v2/subtitles/search`, {
@@ -262,14 +262,14 @@ async function handleSubtitles(req, res, encodedConfig) {
                 id: `subdl-vi-${sub.id || Math.random()}`,
                 url: `\( {hostUrl}/proxy-sub?url= \){encodeURIComponent(dlUrl)}&provider=subdl&key=${encodeURIComponent(config.subdlKey)}`,
                 lang: 'vie',
-                name: `🇻🇳 [Subdl] ${originalName}`
+                name: `🇵🇭 [Subdl] ${originalName}`
               });
             } else if (['en', 'eng', 'english'].includes(lang)) {
               subtitles.push({
                 id: `ai-subdl-${sub.id || Math.random()}`,
                 url: `\( {hostUrl}/translate-sub?url= \){encodeURIComponent(dlUrl)}&model=\( {modelToUse}&config= \){encodedConfig || ''}&imdbId=\( {imdbId}&type= \){type}&season=\( {season || ''}&episode= \){episode || ''}&provider=subdl&key=${encodeURIComponent(config.subdlKey)}`,
                 lang: 'vie',
-                name: `🤖 AI [\( {modelToUse}] (Subdl) [⏱️ Dự kiến \~ \){estTimeStr}]: ${originalName}`
+                name: `🤖 AI [\( {modelToUse}] (Subdl) [⏱️ \~ \){estTimeStr}]: ${originalName}`
               });
             }
           }
@@ -278,7 +278,7 @@ async function handleSubtitles(req, res, encodedConfig) {
     } catch (e) {}
   }
 
-  // 3. Subsource (fallback từ site cộng đồng - không cần API key)
+  // 3. Subsource (fallback scraper site)
   if (imdbId) {
     try {
       const subsourceRes = await axios.get(`https://api.subsource.dev/api/subtitles`, {
@@ -304,14 +304,14 @@ async function handleSubtitles(req, res, encodedConfig) {
                 id: `subsource-vi-${sub.id || Math.random()}`,
                 url: `\( {hostUrl}/proxy-sub?url= \){encodeURIComponent(dlUrl)}&provider=subsource&key=${encodeURIComponent(config.subsourceKey || '')}`,
                 lang: 'vie',
-                name: `🇻🇳 [Subsource] ${originalName}`
+                name: `🇵🇭 [Subsource] ${originalName}`
               });
             } else if (['en', 'eng', 'english'].includes(lang)) {
               subtitles.push({
                 id: `ai-subsource-${sub.id || Math.random()}`,
                 url: `\( {hostUrl}/translate-sub?url= \){encodeURIComponent(dlUrl)}&model=\( {modelToUse}&config= \){encodedConfig || ''}&imdbId=\( {imdbId}&type= \){type}&season=\( {season || ''}&episode= \){episode || ''}&provider=subsource&key=${encodeURIComponent(config.subsourceKey || '')}`,
                 lang: 'vie',
-                name: `🤖 AI [\( {modelToUse}] (Subsource) [⏱️ Dự kiến \~ \){estTimeStr}]: ${originalName}`
+                name: `🤖 AI [\( {modelToUse}] (Subsource) [⏱️ \~ \){estTimeStr}]: ${originalName}`
               });
             }
           }
@@ -321,8 +321,8 @@ async function handleSubtitles(req, res, encodedConfig) {
   }
 
   subtitles.sort((a, b) => {
-    const isAOriginal = a.name.includes('🇻🇳');
-    const isBOriginal = b.name.includes('🇻🇳');
+    const isAOriginal = a.name.includes('🇵🇭');
+    const isBOriginal = b.name.includes('🇵🇭');
     if (isAOriginal && !isBOriginal) return -1;
     if (!isAOriginal && isBOriginal) return 1;
     return 0;
@@ -560,5 +560,5 @@ app.get('/:config/subtitles/:type/:id.json', (req, res) => handleSubtitles(req, 
 app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, res, req.params.config));
 
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`✅ Server is running on port ${PORT} - SubSource + Subdl đã fix`);
 });
