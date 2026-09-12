@@ -60,9 +60,9 @@ function renderConfigPage(req, res, savedConfig) {
                 <label>Mô hình AI dịch ưu tiên:</label>
                 <select id="modelSelect">
                     <optgroup label="Google Gemini">
-                        <option value="gemini-2.0-flash" ${savedConfig.model === 'gemini-2.0-flash' ? 'selected' : ''}>Gemini 2.0 Flash (Khuyên dùng - Ổn định nhất)</option>
-                        <option value="gemini-1.5-flash" ${savedConfig.model === 'gemini-1.5-flash' ? 'selected' : ''}>Gemini 1.5 Flash</option>
-                        <option value="gemini-1.5-pro" ${savedConfig.model === 'gemini-1.5-pro' ? 'selected' : ''}>Gemini 1.5 Pro</option>
+                        <option value="gemini-3.8-flash" ${savedConfig.model === 'gemini-3.8-flash' || !savedConfig.model ? 'selected' : ''}>Gemini 3.8 Flash (Mặc định)</option>
+                        <option value="gemini-3.5-flash" ${savedConfig.model === 'gemini-3.5-flash' ? 'selected' : ''}>Gemini 3.5 Flash</option>
+                        <option value="gemini-3.1-flash-lite" ${savedConfig.model === 'gemini-3.1-flash-lite' ? 'selected' : ''}>Gemini 3.1 Flash-Lite</option>
                     </optgroup>
                     <optgroup label="OpenAI ChatGPT">
                         <option value="gpt-4o-mini" ${savedConfig.model === 'gpt-4o-mini' ? 'selected' : ''}>ChatGPT: GPT-4o-mini</option>
@@ -173,7 +173,7 @@ async function handleSubtitles(req, res, encodedConfig) {
 
     let subtitles = [];
     const hostUrl = `${req.protocol}://${req.get('host')}`;
-    const modelToUse = config.model || 'gemini-2.0-flash';
+    const modelToUse = config.model || 'gemini-3.8-flash';
 
     // 1. OpenSubtitles
     if (config.opensubtitlesKey) {
@@ -350,7 +350,7 @@ app.get('/translate-sub', async (req, res) => {
     const config = parseConfig(configQuery);
     const geminiKeys = config.geminiKeys || [process.env.GEMINI_API_KEY].filter(Boolean);
     const openaiKey = config.openaiKey || process.env.OPENAI_API_KEY;
-    const selectedModel = model || config.model || 'gemini-2.0-flash';
+    const selectedModel = model || config.model || 'gemini-3.8-flash';
 
     let originalSrt = "";
     try {
@@ -389,8 +389,8 @@ app.get('/translate-sub', async (req, res) => {
     }
 
     if (!success && geminiKeys.length > 0) {
-        const modelsToTry = [selectedModel, 'gemini-2.0-flash', 'gemini-1.5-flash'];
-        const uniqueModels = [...new Set(modelsToTry.filter(m => !m.startsWith('gpt-')))];
+        const modelsToTry = [selectedModel, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
+        const uniqueModels = [...new Set(modelsToTry.filter(m => typeof m === 'string' && m.startsWith('gemini-')))];
 
         for (const key of geminiKeys) {
             if (success) break;
@@ -430,4 +430,3 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
-
