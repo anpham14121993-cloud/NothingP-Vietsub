@@ -10,10 +10,11 @@ app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v1.5.9',
+  'User-Agent': 'AISubtitlePro v2.0.0',
   Accept: 'application/json'
 };
 
+// Giải mã cấu hình từ URL của Stremio
 function parseConfig(encodedConfig) {
   if (!encodedConfig || encodedConfig === 'undefined' || encodedConfig === 'null') return {};
   try {
@@ -37,6 +38,7 @@ function escapeHtml(value) {
   }[char]));
 }
 
+// Giao diện trang cấu hình Addon (Cài đặt API Key trực tiếp)
 app.get('/', (req, res) => res.redirect('/configure'));
 app.get('/configure', (req, res) => renderConfigPage(req, res, {}));
 app.get('/:config/configure', (req, res) => {
@@ -50,45 +52,37 @@ function renderConfigPage(req, res, savedConfig) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cấu hình AI Subtitle Pro</title>
+<title>Cấu hình Gemini AI Subtitle Pro</title>
 <style>
 body{background:#121212;color:#fff;font-family:Arial,sans-serif;padding:20px;display:flex;justify-content:center}
-.container{width:100%;max-width:520px;background:#1e1e1e;padding:20px;border-radius:8px}
-h2{text-align:center;color:#ff5252}
+.container{width:100%;max-width:520px;background:#1e1e1e;padding:25px;border-radius:10px;box-shadow:0 4px 15px rgba(0,0,0,0.5)}
+h2{text-align:center;color:#ff5252;margin-bottom:20px}
 label{display:block;margin:12px 0 5px;font-size:13px;color:#ccc}
-input,select{width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;color:#fff;border-radius:4px;box-sizing:border-box}
-.section-title{color:#4fc3f7;margin-top:18px;font-size:14px;font-weight:bold;border-bottom:1px solid #333;padding-bottom:4px}
-button{width:100%;padding:12px;border:0;border-radius:4px;color:#fff;font-weight:bold;margin-top:12px;cursor:pointer}
+input,select{width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;color:#fff;border-radius:5px;box-sizing:border-box}
+.section-title{color:#4fc3f7;margin-top:20px;font-size:14px;font-weight:bold;border-bottom:1px solid #333;padding-bottom:5px}
+button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight:bold;margin-top:15px;cursor:pointer;font-size:14px}
 #installBtn{background:#e50914}#copyBtn{background:#2196F3}
 </style>
 </head>
 <body>
 <div class="container">
-<h2>Cấu hình AI Subtitle Pro</h2>
+<h2>Gemini AI Subtitle Pro</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
-<optgroup label="Google Gemini">
-<option value="gemini-3.8-flash" ${savedConfig.model === 'gemini-3.8-flash' || !savedConfig.model ? 'selected' : ''}>Gemini 3.8 Flash</option>
-<option value="gemini-3.5-flash" ${savedConfig.model === 'gemini-3.5-flash' ? 'selected' : ''}>Gemini 3.5 Flash</option>
-<option value="gemini-3.1-flash-lite" ${savedConfig.model === 'gemini-3.1-flash-lite' ? 'selected' : ''}>Gemini 3.1 Flash-Lite</option>
-</optgroup>
-<optgroup label="OpenAI">
-<option value="gpt-4o-mini" ${savedConfig.model === 'gpt-4o-mini' ? 'selected' : ''}>GPT-4o-mini</option>
-<option value="gpt-4o" ${savedConfig.model === 'gpt-4o' ? 'selected' : ''}>GPT-4o</option>
-</optgroup>
+<option value="gemini-2.5-flash" ${savedConfig.model === 'gemini-2.5-flash' || !savedConfig.model ? 'selected' : ''}>Gemini 2.5 Flash (Khuyên dùng)</option>
+<option value="gemini-2.0-flash" ${savedConfig.model === 'gemini-2.0-flash' ? 'selected' : ''}>Gemini 2.0 Flash</option>
+<option value="gemini-1.5-flash" ${savedConfig.model === 'gemini-1.5-flash' ? 'selected' : ''}>Gemini 1.5 Flash</option>
 </select>
-<div class="section-title">🔑 API Keys AI</div>
-<label>Gemini API Key 1</label><input id="geminiKey1" value="${escapeHtml(geminiKeys[0])}">
+<div class="section-title">🔑 Google Gemini API Keys (Có thể nhập nhiều key để xoay vòng)</div>
+<label>Gemini API Key 1</label><input id="geminiKey1" value="${escapeHtml(geminiKeys[0])}" placeholder="AIzaSy...">
 <label>Gemini API Key 2</label><input id="geminiKey2" value="${escapeHtml(geminiKeys[1])}">
 <label>Gemini API Key 3</label><input id="geminiKey3" value="${escapeHtml(geminiKeys[2])}">
-<label>OpenAI API Key</label><input id="openaiKey" value="${escapeHtml(savedConfig.openaiKey)}">
-<div class="section-title">📥 Nguồn phụ đề</div>
-<label>OpenSubtitles API Key</label><input id="opensubtitlesKey" value="${escapeHtml(savedConfig.opensubtitlesKey)}">
+<div class="section-title">📥 Nguồn phụ đề (Tùy chọn)</div>
+<label>OpenSubtitles API Key (Bỏ trống nếu dùng bản public)</label><input id="opensubtitlesKey" value="${escapeHtml(savedConfig.opensubtitlesKey)}">
 <label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
-<label>Subsource API Key</label><input id="subsourceKey" value="${escapeHtml(savedConfig.subsourceKey)}">
-<button type="button" id="installBtn">Cài đặt trực tiếp vào Nuvio</button>
-<label>Link Addon</label><input id="addonUrlOutput" readonly>
+<button type="button" id="installBtn">Cài đặt trực tiếp vào Stremio</button>
+<label style="margin-top:20px">Link Addon (Cập nhật tự động):</label><input id="addonUrlOutput" readonly>
 <button type="button" id="copyBtn">📋 Sao chép Link Addon</button>
 </form>
 </div>
@@ -97,10 +91,8 @@ function getAddonUrl(){
   const config={
     model:document.getElementById('modelSelect').value,
     geminiKeys:['geminiKey1','geminiKey2','geminiKey3'].map(id=>document.getElementById(id).value.trim()).filter(Boolean),
-    openaiKey:document.getElementById('openaiKey').value.trim(),
     opensubtitlesKey:document.getElementById('opensubtitlesKey').value.trim(),
-    subdlKey:document.getElementById('subdlKey').value.trim(),
-    subsourceKey:document.getElementById('subsourceKey').value.trim()
+    subdlKey:document.getElementById('subdlKey').value.trim()
   };
   return location.origin+'/'+btoa(unescape(encodeURIComponent(JSON.stringify(config))))+'/manifest.json';
 }
@@ -111,18 +103,19 @@ document.getElementById('copyBtn').onclick=async()=>{
   const url=getAddonUrl(), input=document.getElementById('addonUrlOutput');
   input.value=url; input.select();
   try{await navigator.clipboard.writeText(url);alert('Đã sao chép link addon!')}
-  catch{alert('Hãy sao chép link trong ô bên trên.')}
+  catch{alert('Hãy sao chép link trong ô.')}
 };
+document.getElementById('addonUrlOutput').value = getAddonUrl();
 </script>
 </body>
 </html>`);
 }
 
 const defaultManifest = {
-  id: 'org.ai.subtitle.pro',
-  version: '1.5.9',
-  name: 'AI Subtitle Pro',
-  description: 'Addon phụ đề tự động tiếng Việt thông minh',
+  id: 'org.gemini.ai.subtitle.pro',
+  version: '2.0.0',
+  name: 'Gemini AI Subtitle Pro',
+  description: 'Tự động tìm sub Việt hoặc dịch phụ đề Tiếng Anh sang Tiếng Việt cực mượt bằng Google Gemini AI.',
   types: ['movie', 'series'],
   catalogs: [],
   resources: ['subtitles'],
@@ -144,76 +137,44 @@ function languageCode(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-// BỘ LỌC NGÔN NGỮ TIẾNG VIỆT ĐÃ ĐƯỢC MỞ RỘNG (Bắt trọn vi, vie, vnm, vn, vi-VN, Vietnamese...)
 function isVietnamese(value) {
   const code = languageCode(value);
-  return code === 'vi' || 
-         code === 'vie' || 
-         code === 'vnm' || 
-         code === 'vn' || 
-         code.startsWith('vi') || 
-         code.includes('viet') || 
-         code.includes('tiếng việt');
+  return code === 'vi' || code === 'vie' || code === 'vnm' || code === 'vn' || code.startsWith('vi') || code.includes('viet');
 }
 
 function isEnglish(value) {
   const code = languageCode(value);
-  return code === 'en' || code === 'eng' || code === 'english' || code.includes('eng');
+  return code === 'en' || code === 'eng' || code === 'english';
 }
 
 function subtitleName(sub, fallback) {
-  return sub?.releaseName || sub?.release_name ||
-    sub?.fileName || sub?.file_name ||
-    sub?.name || fallback;
-}
-
-function getProviderHeaders(provider, key) {
-  const headers = {
-    'User-Agent': 'AISubtitlePro v1.5.9',
-    Accept: '*/*'
-  };
-  if (provider === 'subsource' && key) headers['X-API-Key'] = key;
-  if (provider === 'opensubtitles' && key) headers['Api-Key'] = key;
-  return headers;
+  return sub?.releaseName || sub?.release_name || sub?.fileName || sub?.file_name || sub?.name || fallback;
 }
 
 function extractSubtitleText(buffer) {
   const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
-  const isZip = data.length >= 4 &&
-    data[0] === 0x50 && data[1] === 0x4b;
+  const isZip = data.length >= 4 && data[0] === 0x50 && data[1] === 0x4b;
 
   if (!isZip) {
     return data.toString('utf8').replace(/^\uFEFF/, '');
   }
 
   const entries = new AdmZip(data).getEntries().filter(entry =>
-    !entry.isDirectory &&
-    /\.(srt|vtt|ass|ssa|sub)$/i.test(entry.entryName)
+    !entry.isDirectory && /\.(srt|vtt|ass|ssa|sub)$/i.test(entry.entryName)
   );
 
-  const selected =
-    entries.find(entry => /\.srt$/i.test(entry.entryName)) ||
-    entries.find(entry => /\.vtt$/i.test(entry.entryName)) ||
-    entries.find(entry => /\.ass$/i.test(entry.entryName)) ||
-    entries.find(entry => /\.ssa$/i.test(entry.entryName)) ||
-    entries.find(entry => /\.sub$/i.test(entry.entryName));
-
+  const selected = entries.find(e => /\.srt$/i.test(e.entryName)) || entries[0];
   if (!selected) throw new Error('ZIP không chứa file phụ đề hỗ trợ');
 
   return selected.getData().toString('utf8').replace(/^\uFEFF/, '');
 }
 
 async function fetchSubtitleText(url, headers = {}, timeout = 20000) {
-  const response = await axios.get(url, {
-    headers,
-    responseType: 'arraybuffer',
-    timeout,
-    maxRedirects: 5
-  });
+  const response = await axios.get(url, { headers, responseType: 'arraybuffer', timeout, maxRedirects: 5 });
   return extractSubtitleText(Buffer.from(response.data));
 }
 
-function splitSrtIntoChunks(srt, maxChars = 8000) {
+function splitSrtIntoChunks(srt, maxChars = 7500) {
   const blocks = srt.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
   const chunks = [];
   let current = '';
@@ -225,7 +186,6 @@ function splitSrtIntoChunks(srt, maxChars = 8000) {
     }
     current += (current ? '\n\n' : '') + block;
   }
-
   if (current) chunks.push(current);
   return chunks.length ? chunks : [srt];
 }
@@ -257,65 +217,30 @@ function cleanAndRebuildSrt(srtText) {
       entries.push({ start, end, text, startMs: parseTimeToMs(start) });
     }
   }
-
   entries.sort((a, b) => a.startMs - b.startMs);
-
-  return entries.map((entry, index) =>
-    `${index + 1}\n${entry.start} --> ${entry.end}\n${entry.text}`
-  ).join('\n\n') || srtText;
+  return entries.map((e, index) => `${index + 1}\n${e.start} --> ${e.end}\n${e.text}`).join('\n\n') || srtText;
 }
 
-async function callAI(prompt, modelOrder, geminiKeys, openaiKey, timeout = 90000) {
-  let lastError = 'Chưa rõ nguyên nhân';
+// Gọi AI luân phiên các key và chống lỗi Rate Limit
+async function callAI(prompt, geminiKeys, model) {
+  let lastError = 'Lỗi không xác định';
+  for (const key of geminiKeys) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+      const response = await axios.post(url, {
+        contents: [{ parts: [{ text: prompt }] }]
+      }, { timeout: 60000 });
 
-  for (const model of modelOrder) {
-    if (model.startsWith('gemini-')) {
-      for (const key of geminiKeys) {
-        try {
-          const url =
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-          const response = await axios.post(url, {
-            contents: [{ parts: [{ text: prompt }] }]
-          }, { timeout });
-
-          const result = response.data?.candidates?.[0]?.content?.parts
-            ?.map(part => part.text || '').join('');
-
-          if (result) return { result, lastError: '' };
-        } catch (error) {
-          lastError = error.response?.data?.error?.message || error.message;
-          if (error.response?.status !== 429 && !/quota|RESOURCE_EXHAUSTED/i.test(lastError)) break;
-        }
-      }
-    } else if (model.startsWith('gpt-') && openaiKey) {
-      try {
-        const response = await axios.post(
-          'https://api.openai.com/v1/chat/completions',
-          {
-            model,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.3
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${openaiKey}`,
-              'Content-Type': 'application/json'
-            },
-            timeout
-          }
-        );
-
-        const result = response.data?.choices?.[0]?.message?.content || '';
-        if (result) return { result, lastError: '' };
-      } catch (error) {
-        lastError = error.response?.data?.error?.message || error.message;
-      }
+      const result = response.data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('');
+      if (result) return { result, error: null };
+    } catch (err) {
+      lastError = err.response?.data?.error?.message || err.message;
     }
   }
-
-  return { result: '', lastError };
+  return { result: '', error: lastError };
 }
 
+// Xử lý yêu cầu trả về danh sách phụ đề cho Stremio giống hệt giao diện bạn muốn
 async function handleSubtitles(req, res, encodedConfig) {
   const config = parseConfig(encodedConfig);
   const { type, id } = req.params;
@@ -324,402 +249,214 @@ async function handleSubtitles(req, res, encodedConfig) {
   const season = parts[1] ? parseInt(parts[1], 10) : null;
   const episode = parts[2] ? parseInt(parts[2], 10) : null;
   const hostUrl = makeHostUrl(req);
-  const modelToUse = config.model || 'gemini-3.8-flash';
-  const estTimeStr = type === 'series' ? '15-20s' : '25-35s';
-  
+  const modelToUse = config.model || 'gemini-2.5-flash';
+
   let nativeVietSubtitles = [];
-  let englishSubtitles = [];
+  let englishSubtitlesForAI = [];
 
-  // 1. OpenSubtitles
-  if (config.opensubtitlesKey) {
-    try {
-      const params = { languages: 'vi,en,vie' };
-      if (imdbId.startsWith('tt')) params.imdb_id = imdbId.replace(/^tt/, '');
-      if (type === 'series' && season !== null && episode !== null) {
-        params.season_number = season;
-        params.episode_number = episode;
+  // 1. Quét OpenSubtitles
+  try {
+    const osParams = { languages: 'vi,en,vie' };
+    if (imdbId.startsWith('tt')) osParams.imdb_id = imdbId.replace(/^tt/, '');
+    if (type === 'series' && season !== null && episode !== null) {
+      osParams.season_number = season;
+      osParams.episode_number = episode;
+    }
+
+    const apiKeyOS = config.opensubtitlesKey || '2015';
+    const osRes = await axios.get('https://api.opensubtitles.com/api/v1/subtitles', {
+      params: osParams,
+      headers: { 'Api-Key': apiKeyOS, ...API_HEADERS },
+      timeout: 8000
+    });
+
+    for (const item of (osRes.data?.data || []).slice(0, 8)) {
+      const file = item.attributes?.files?.[0];
+      const lang = item.attributes?.language || '';
+      if (!file?.file_id) continue;
+
+      const download = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: file.file_id }, {
+        headers: { 'Api-Key': apiKeyOS, ...API_HEADERS, 'Content-Type': 'application/json' },
+        timeout: 8000
+      }).catch(() => null);
+
+      if (!download?.data?.link) continue;
+      const releaseName = item.attributes?.release || file.file_name || 'OpenSubtitles Sub';
+
+      if (isVietnamese(lang)) {
+        nativeVietSubtitles.push({
+          id: `os-vi-${item.id}`,
+          url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(download.data.link)}`,
+          lang: 'vie',
+          name: `🇻🇳 [Việt Nam] ${releaseName}`
+        });
+      } else if (isEnglish(lang)) {
+        // Tạo link dịch AI format giống hệt ảnh mẫu của bạn: [GEMINI AI] Tiếng Anh - Tên file gốc
+        englishSubtitlesForAI.push({
+          id: `ai-os-${item.id}`,
+          url: `${hostUrl}/translate-sub?url=${encodeURIComponent(download.data.link)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
+          lang: 'vie',
+          name: `[GEMINI AI] Tiếng Anh\n${releaseName}`
+        });
       }
+    }
+  } catch (err) {}
 
-      const response = await axios.get(
-        'https://api.opensubtitles.com/api/v1/subtitles',
-        {
-          params,
-          headers: { 'Api-Key': config.opensubtitlesKey, ...API_HEADERS },
-          timeout: 8000
-        }
-      );
+  // 2. Quét SubDL nếu cần thêm
+  try {
+    if (imdbId && englishSubtitlesForAI.length < 5) {
+      const subdlRes = await axios.get('https://api.subdl.com/api/v1/subtitles', {
+        params: {
+          api_key: config.subdlKey || '',
+          imdb_id: imdbId,
+          type: type === 'series' ? 'tv' : 'movie',
+          languages: 'VI,EN',
+          season: season,
+          episode: episode,
+          unpack: 1
+        },
+        timeout: 8000
+      });
 
-      for (const item of (response.data?.data || []).slice(0, 6)) {
-        const file = item.attributes?.files?.[0];
-        const lang = item.attributes?.language || '';
-        if (!file?.file_id) continue;
-
-        try {
-          const download = await axios.post(
-            'https://api.opensubtitles.com/api/v1/download',
-            { file_id: file.file_id },
-            {
-              headers: {
-                'Api-Key': config.opensubtitlesKey,
-                ...API_HEADERS,
-                'Content-Type': 'application/json'
-              },
-              timeout: 8000
-            }
-          );
-
-          if (!download.data?.link) continue;
-          const originalName = item.attributes?.release || file.file_name || 'OpenSubtitles';
-
-          if (isVietnamese(lang)) {
-            nativeVietSubtitles.push({
-              id: `os-vi-${item.id}`,
-              url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(download.data.link)}&provider=opensubtitles&key=${encodeURIComponent(config.opensubtitlesKey)}`,
-              lang: 'vie',
-              name: `🇻🇳 [OpenSubtitles] ${originalName}`
-            });
-          } else if (isEnglish(lang)) {
-            englishSubtitles.push({
-              id: `ai-os-${item.id}`,
-              url: `${hostUrl}/translate-sub?url=${encodeURIComponent(download.data.link)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&provider=opensubtitles&key=${encodeURIComponent(config.opensubtitlesKey)}`,
-              lang: 'vie',
-              name: `🤖 AI [${modelToUse}] (OpenSubtitles) [⏱️ ~${estTimeStr}]: ${originalName}`
-            });
-          }
-        } catch (error) {}
-      }
-    } catch (error) {}
-  }
-
-  // 2. SubDL API v1
-  if (config.subdlKey && imdbId) {
-    try {
-      const params = {
-        api_key: config.subdlKey,
-        imdb_id: imdbId,
-        type: type === 'series' ? 'tv' : 'movie',
-        languages: 'VI,EN',
-        subs_per_page: 30,
-        unpack: 1
-      };
-
-      if (type === 'series' && season !== null && episode !== null) {
-        params.season_number = season;
-        params.episode_number = episode;
-      }
-
-      const response = await axios.get(
-        'https://api.subdl.com/api/v1/subtitles',
-        { params, timeout: 10000 }
-      );
-
-      const list = Array.isArray(response.data?.subtitles)
-        ? response.data.subtitles
-        : [];
-
-      for (const sub of list.slice(0, 6)) {
-        const lang = sub.language || sub.lang || '';
+      for (const sub of (subdlRes.data?.subtitles || []).slice(0, 6)) {
+        const lang = sub.language || '';
         if (!sub.url) continue;
-
-        const downloadUrl = /^https?:\/\//i.test(sub.url)
-          ? sub.url
-          : `https://dl.subdl.com${sub.url.startsWith('/') ? '' : '/'}${sub.url}`;
-
-        const name = subtitleName(sub, 'SubDL subtitle');
-        const subId = sub.n_id || sub.id || sub.url;
+        const dlUrl = sub.url.startsWith('http') ? sub.url : `https://dl.subdl.com${sub.url}`;
+        const releaseName = subtitleName(sub, 'SubDL Sub');
 
         if (isVietnamese(lang)) {
           nativeVietSubtitles.push({
-            id: `subdl-vi-${subId}`,
-            url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(downloadUrl)}&provider=subdl`,
+            id: `subdl-vi-${sub.n_id || sub.id}`,
+            url: `${hostUrl}/proxy-sub?url=${encodeURIComponent(dlUrl)}`,
             lang: 'vie',
-            name: `🇻🇳 [SubDL] ${name}`
+            name: `🇻🇳 [Việt Nam] ${releaseName}`
           });
         } else if (isEnglish(lang)) {
-          englishSubtitles.push({
-            id: `ai-subdl-${subId}`,
-            url: `${hostUrl}/translate-sub?url=${encodeURIComponent(downloadUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&provider=subdl`,
+          englishSubtitlesForAI.push({
+            id: `ai-subdl-${sub.n_id || sub.id}`,
+            url: `${hostUrl}/translate-sub?url=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}`,
             lang: 'vie',
-            name: `🤖 AI [${modelToUse}] (SubDL) [⏱️ ~${estTimeStr}]: ${name}`
+            name: `[GEMINI AI] Tiếng Anh\n${releaseName}`
           });
         }
       }
-    } catch (error) {}
-  }
+    }
+  } catch (err) {}
 
-  // 3. Subsource
-  if (config.subsourceKey && imdbId) {
-    try {
-      const headers = {
-        'X-API-Key': config.subsourceKey,
-        ...API_HEADERS
-      };
-
-      const searchResponse = await axios.get(
-        'https://api.subsource.net/api/v1/subtitles',
-        {
-          params: { imdb_id: imdbId, languages: 'vi,en' },
-          headers,
-          timeout: 10000
-        }
-      );
-
-      const searchData = searchResponse.data;
-      const list = Array.isArray(searchData)
-        ? searchData
-        : Array.isArray(searchData?.data)
-          ? searchData.data
-          : Array.isArray(searchData?.subtitles)
-            ? searchData.subtitles
-            : [];
-
-      for (const item of list.slice(0, 6)) {
-        const subId = item?.id;
-        if (subId === undefined || subId === null) continue;
-
-        try {
-          const detailResponse = await axios.get(
-            `https://api.subsource.net/api/v1/subtitles/${encodeURIComponent(subId)}`,
-            { headers, timeout: 10000 }
-          );
-
-          const detailData = detailResponse.data;
-          const detail = detailData?.data || detailData?.subtitle || detailData;
-          const lang = detail?.language || detail?.lang || item?.language || item?.lang || '';
-          const name = subtitleName(detail, subtitleName(item, `Subsource ${subId}`));
-
-          const downloadUrl =
-            `${hostUrl}/subsource-download/${encodeURIComponent(subId)}` +
-            `?key=${encodeURIComponent(config.subsourceKey)}`;
-
-          if (isVietnamese(lang)) {
-            nativeVietSubtitles.push({
-              id: `subsource-vi-${subId}`,
-              url: downloadUrl,
-              lang: 'vie',
-              name: `🇻🇳 [Subsource] ${name}`
-            });
-          } else if (isEnglish(lang)) {
-            englishSubtitles.push({
-              id: `ai-subsource-${subId}`,
-              url: `${hostUrl}/translate-sub?url=${encodeURIComponent(downloadUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&provider=subsource`,
-              lang: 'vie',
-              name: `🤖 AI [${modelToUse}] (Subsource) [⏱️ ~${estTimeStr}]: ${name}`
-            });
-          }
-        } catch (error) {}
-      }
-    } catch (error) {}
-  }
-
-  let subtitles = [];
-  if (nativeVietSubtitles.length > 0) {
-    // Ưu tiên tuyệt đối sub Việt gốc, ẩn toàn bộ tùy chọn AI dịch
-    subtitles = nativeVietSubtitles;
-  } else {
-    // Chỉ khi không tìm thấy sub Việt gốc mới hiển thị tùy chọn dịch AI từ sub Anh
-    subtitles = englishSubtitles;
-  }
+  // Gom kết quả: Hiển thị cả sub Việt gốc lẫn danh sách sub Anh được tích hợp sẵn tùy chọn dịch AI
+  let subtitles = [...nativeVietSubtitles, ...englishSubtitlesForAI];
 
   if (!subtitles.length) {
     subtitles.push({
       id: 'ai-notice',
       url: 'https://raw.githubusercontent.com/SubtitleEdit/subtitleedit/master/CHANGELOG.txt',
       lang: 'vie',
-      name: '⚠️ [AI Subtitle Pro] Chưa tìm thấy sub. Hãy cấu hình API Key.'
+      name: '⚠️ [Gemini AI] Không tìm thấy phụ đề. Hãy cấu hình API Key ở trang cài đặt addon.'
     });
   }
 
   res.json({ subtitles });
 }
 
-// Subsource download endpoint
-app.get('/subsource-download/:id', async (req, res) => {
-  const { id } = req.params;
-  const key = req.query.key;
-
-  if (!id || !key) return res.status(400).send('Missing ID or API key');
-
-  try {
-    const url =
-      `https://api.subsource.net/api/v1/subtitles/${encodeURIComponent(id)}/download`;
-
-    const text = await fetchSubtitleText(url, {
-      'X-API-Key': key,
-      ...API_HEADERS
-    });
-
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    return res.send(text);
-  } catch (error) {
-    return res.status(error.response?.status || 502)
-      .send('Không thể tải hoặc giải nén phụ đề Subsource');
-  }
-});
-
-// Proxy endpoint
+// Proxy tải phụ đề thường
 app.get('/proxy-sub', async (req, res) => {
-  const { url, provider, key } = req.query;
+  const { url } = req.query;
   if (!url) return res.status(400).send('Missing URL');
-
   try {
-    const text = await fetchSubtitleText(
-      url,
-      getProviderHeaders(provider, key)
-    );
+    const text = await fetchSubtitleText(url);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    return res.send(text);
-  } catch (error) {
-    return res.status(error.response?.status || 502)
-      .send('Không thể tải hoặc giải nén phụ đề');
+    res.send(text);
+  } catch (err) {
+    res.status(502).send('Không thể tải phụ đề gốc.');
   }
 });
 
+// Endpoint thực hiện dịch thuật thông minh từng phần (chống lỗi 1/7, 1/8 và quota)
 app.get('/translate-sub', async (req, res) => {
-  const {
-    url, model, config: configQuery, imdbId,
-    type, season, episode, provider, key
-  } = req.query;
-
+  const { url, model, config: configQuery, imdbId, type, season, episode } = req.query;
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
 
-  if (!url) {
-    return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI]: Đường link tải phụ đề bị trống.');
-  }
+  if (!url) return res.send('1\n00:00:01,000 --> 00:00:05,000\n[LỖI]: Thiếu đường dẫn file phụ đề để dịch.');
 
   try {
     const config = parseConfig(configQuery);
-    const geminiKeys = (config.geminiKeys || [process.env.GEMINI_API_KEY].filter(Boolean)).filter(Boolean);
-    const openaiKey = config.openaiKey || process.env.OPENAI_API_KEY;
-    const selectedModel = model || config.model || 'gemini-3.8-flash';
+    const geminiKeys = (config.geminiKeys && config.geminiKeys.length > 0)
+      ? config.geminiKeys
+      : [process.env.GEMINI_API_KEY].filter(Boolean);
 
-    let originalSrt;
-    try {
-      originalSrt = await fetchSubtitleText(
-        url,
-        getProviderHeaders(provider, key)
-      );
-    } catch (error) {
-      return res.send(
-        '1\n00:00:01,000 --> 00:00:08,000\n[LỖI TẢI FILE ĐỂ DỊCH]: ' +
-        error.message
-      );
+    if (!geminiKeys.length) {
+      return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI]: Bạn chưa cấu hình Gemini API Key. Hãy truy cập trang cấu hình addon để nhập Key.');
     }
 
-    const geminiModels = [
-      'gemini-3.8-flash',
-      'gemini-3.5-flash',
-      'gemini-3.1-flash-lite'
-    ];
-    const gptModels = ['gpt-4o-mini', 'gpt-4o'];
+    const selectedModel = model || config.model || 'gemini-2.5-flash';
 
-    const modelOrder = selectedModel.startsWith('gpt-')
-      ? [selectedModel, ...gptModels.filter(m => m !== selectedModel), ...geminiModels]
-      : [selectedModel, ...geminiModels.filter(m => m !== selectedModel), ...gptModels];
+    // Tải nội dung phụ đề tiếng Anh gốc
+    let originalSrt;
+    try {
+      originalSrt = await fetchSubtitleText(url);
+    } catch (err) {
+      return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI]: Không tải được file phụ đề tiếng Anh.');
+    }
 
+    // Lấy thông tin ngữ cảnh phim từ Cinemeta để AI dịch chuẩn xưng hô
     let movieContext = 'Phim điện ảnh/truyền hình tổng quát.';
-
     if (imdbId) {
       try {
-        const metaResponse = await axios.get(
-          `https://v3-cinemeta.strem.io/meta/${type === 'series' ? 'series' : 'movie'}/${imdbId}.json`,
-          { timeout: 5000 }
-        );
-
-        const meta = metaResponse.data?.meta;
+        const metaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/${type === 'series' ? 'series' : 'movie'}/${imdbId}.json`, { timeout: 4000 });
+        const meta = metaRes.data?.meta;
         if (meta) {
-          movieContext =
-            `Tên phim: ${meta.name || ''}\n` +
-            `Thể loại: ${meta.genres?.join(', ') || ''}\n` +
-            `Mô tả: ${meta.description || ''}`;
-
+          movieContext = `Tên phim: ${meta.name || ''}\nThể loại: ${meta.genres?.join(', ') || ''}\nMô tả: ${meta.description || ''}`;
           if (type === 'series' && season && episode && Array.isArray(meta.videos)) {
-            const currentEpisode = meta.videos.find(video =>
-              video.season === parseInt(season, 10) &&
-              video.episode === parseInt(episode, 10)
-            );
-
-            if (currentEpisode) {
-              movieContext +=
-                `\nTập ${season}x${episode}: ${currentEpisode.name || ''}\n` +
-                `Mô tả tập: ${currentEpisode.overview || currentEpisode.description || ''}`;
-            }
+            const ep = meta.videos.find(v => v.season === parseInt(season, 10) && v.episode === parseInt(episode, 10));
+            if (ep) movieContext += `\nTập ${season}x${episode}: ${ep.name || ''}\nTóm tắt tập: ${ep.overview || ''}`;
           }
         }
       } catch {}
     }
 
-    const guidePrompt =
-      `Dựa vào thông tin phim và mẫu phụ đề, hãy đề xuất quy tắc xưng hô tiếng Việt phù hợp.\n\n` +
-      `[THÔNG TIN PHIM]\n${movieContext}\n\n` +
-      `[MẪU PHỤ ĐỀ]\n${originalSrt.slice(0, 2000)}\n\n` +
-      `Trả lời ngắn gọn bằng tiếng Việt.`;
+    // Gợi ý phong cách xưng hô
+    const guideRes = await callAI(`Dựa vào thông tin phim sau, đề xuất ngắn gọn đại từ nhân xưng tiếng Việt phù hợp nhất:\n${movieContext}`, geminiKeys, selectedModel);
+    const pronounGuide = guideRes.result ? `\n[Quy tắc xưng hô tham khảo]: ${guideRes.result}` : '';
 
-    const guide = await callAI(
-      guidePrompt, modelOrder, geminiKeys, openaiKey, 30000
-    );
-
-    const pronounGuide = guide.result
-      ? `\n\n[QUY TẮC XƯNG HÔ & NGỮ CẢNH]\n${guide.result}`
-      : '';
-
-    const chunks = splitSrtIntoChunks(originalSrt, 8000);
-
-    // DỊCH TUẦN TỰ (SEQUENTIAL) KÈM DELAY 1.5 GIÂY ĐỂ TRÁNH LỖI 429 QUOTA EXCEEDED
+    // Chia file thành các chunk an toàn
+    const chunks = splitSrtIntoChunks(originalSrt, 7500);
     const translated = [];
-    for (let index = 0; index < chunks.length; index++) {
-      const chunk = chunks[index];
-      const prompt =
-        `Bạn là dịch giả phụ đề chuyên nghiệp. Dịch SRT sang tiếng Việt tự nhiên, điện ảnh.${pronounGuide}\n\n` +
-        `BẮT BUỘC: giữ nguyên timestamp, không gộp, không bỏ mục. ` +
-        `Chỉ trả về SRT đã dịch, không giải thích.\n\n${chunk}`;
 
-      const result = await callAI(
-        prompt, modelOrder, geminiKeys, openaiKey, 90000
-      );
+    // Dịch tuần tự từng chunk kèm delay 1.5s để chống tràn giới hạn (Rate Limit / Quota Exceeded)
+    for (let i = 0; i < chunks.length; i++) {
+      const prompt = `Bạn là dịch giả phụ đề chuyên nghiệp. Dịch đoạn mã SRT sau sang tiếng Việt điện ảnh, tự nhiên.${pronounGuide}
+BẮT BUỘC: Giữ nguyên tuyệt đối số thứ tự phụ đề, thời gian (timestamps) và định dạng. Không giải thích gì thêm, chỉ trả về nội dung SRT đã dịch.
 
-      if (!result.result) {
-        throw new Error(`Lỗi phần ${index + 1}/${chunks.length}: ${result.lastError}`);
+${chunks[i]}`;
+
+      const aiRes = await callAI(prompt, geminiKeys, selectedModel);
+      if (!aiRes.result) {
+        // Nếu lỗi ở chunk nào, giữ nguyên bản gốc chunk đó để không làm hỏng file
+        translated.push({ index: i, text: chunks[i] });
+      } else {
+        translated.push({ index: i, text: aiRes.result.trim() });
       }
 
-      translated.push({ index, text: result.result.trim() });
-
-      if (index < chunks.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1500));
+      if (i < chunks.length - 1) {
+        await new Promise(r => setTimeout(r, 1500));
       }
     }
 
     translated.sort((a, b) => a.index - b.index);
-    const finalSrt = cleanAndRebuildSrt(
-      translated.map(item => item.text).join('\n\n')
-    );
-
+    const finalSrt = cleanAndRebuildSrt(translated.map(t => t.text).join('\n\n'));
     return res.send(finalSrt);
-  } catch (error) {
-    return res.send(
-      '1\n00:00:01,000 --> 00:00:10,000\n[LỖI AI DỊCH]: ' +
-      error.message
-    );
+
+  } catch (err) {
+    return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI HỆ THỐNG]: ' + err.message);
   }
 });
 
-app.get('/subtitles/:type/:id.json', (req, res) =>
-  handleSubtitles(req, res, null)
-);
-
-app.get('/subtitles/:type/:id/:extra.json', (req, res) =>
-  handleSubtitles(req, res, null)
-);
-
-app.get('/:config/subtitles/:type/:id.json', (req, res) =>
-  handleSubtitles(req, res, req.params.config)
-);
-
-app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) =>
-  handleSubtitles(req, res, req.params.config)
-);
+app.get('/subtitles/:type/:id.json', (req, res) => handleSubtitles(req, res, null));
+app.get('/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, res, null));
+app.get('/:config/subtitles/:type/:id.json', (req, res) => handleSubtitles(req, res, req.params.config));
+app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, res, req.params.config));
 
 app.listen(PORT, () => {
-  console.log(`AI Subtitle Pro v1.5.9 đang chạy trên port ${PORT}`);
+  console.log(`Gemini AI Subtitle Pro đang chạy tại port ${PORT}`);
 });
 
