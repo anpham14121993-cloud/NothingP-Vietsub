@@ -347,7 +347,6 @@ function splitSrtIntoChunks(srt, maxChars = 8000) {
   return chunks.length ? chunks : [srt];
 }
 
-// Hàm chuẩn hóa, làm sạch và đánh số lại SRT để tránh lỗi chồng chéo phụ đề
 function cleanAndRebuildSrt(srtText) {
   const cleaned = srtText.replace(/\r/g, '').trim();
   const blockStrs = cleaned.split(/\n\s*\n/).filter(Boolean);
@@ -407,32 +406,30 @@ app.get('/translate-sub', async (req, res) => {
     }
 
     const chunks = splitSrtIntoChunks(originalSrt, 8000);
-    const models = [...new Set([selectedModel, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'].filter(m => typeof m === 'string' && m.startsWith('gemini-')))];
+
+    // Xây dựng thứ tự danh sách mô hình dự phòng chuẩn theo ý bạn:
+    const allGeminiModels = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
+    const allGptModels = ['gpt-4o-mini', 'gpt-4o'];
+    
+    let modelOrder = [];
+    if (selectedModel.startsWith('gpt-')) {
+      // Nếu ưu tiên ChatGPT: chạy các model GPT trước, sau đó mới đến toàn bộ Gemini
+      modelOrder = [selectedModel, ...allGptModels.filter(m => m !== selectedModel), ...allGeminiModels];
+    } else {
+      // Nếu ưu tiên Gemini: chạy model Gemini đã chọn trước, quét tiếp các model Gemini còn lại, cuối cùng mới sang GPT
+      modelOrder = [selectedModel, ...allGeminiModels.filter(m => m !== selectedModel), ...allGptModels];
+    }
 
     const translationPromises = chunks.map(async (chunk, i) => {
       const prompt = 'Bạn là dịch giả phụ đề chuyên nghiệp. Dịch nội dung SRT sau sang tiếng Việt tự nhiên. BẮT BUỘC giữ nguyên tuyệt đối cấu trúc timestamp, không gộp, không bỏ mục. Chỉ trả về SRT đã dịch, không giải thích.\n\n' + chunk;
       let result = '';
       let lastError = 'Chưa rõ nguyên nhân';
 
-      if (selectedModel.startsWith('gpt-') && openaiKey) {
-        try {
-          const r = await axios.post('https://api.openai.com/v1/chat/completions', {
-            model: selectedModel,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.3
-          }, {
-            headers: { Authorization: 'Bearer ' + openaiKey, 'Content-Type': 'application/json' },
-            timeout: 90000
-          });
-          result = r.data.choices?.[0]?.message?.content || '';
-        } catch (e) {
-          lastError = e.response?.data?.error?.message || e.message;
-        }
-      }
-
-      if (!result && geminiKeys.length) {
-        geminiKeyLoop: for (const key of geminiKeys) {
-          for (const m of models) {
+      // Vòng lặp tuần tự qua danh sách model theo đúng chuỗi dự phòng ưu tiên
+      for (const m of modelOrder) {
+        if (m.startsWith('gemini-')) {
+          if (!geminiKeys.length) continue;
+          geminiKeyLoop: for (const key of geminiKeys) {
             try {
               const u = 'https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent?key=' + key;
               const r = await axios.post(u, { contents: [{ parts: [{ text: prompt }] }] }, { timeout: 90000 });
@@ -447,7 +444,24 @@ app.get('/translate-sub', async (req, res) => {
               }
             }
           }
+        } else if (m.startsWith('gpt-')) {
+          if (!openaiKey) continue;
+          try {
+            const r = await axios.post('https://api.openai.com/v1/chat/completions', {
+              model: m,
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.3
+            }, {
+              headers: { Authorization: 'Bearer ' + openaiKey, 'Content-Type': 'application/json' },
+              timeout: 90000
+            });
+            result = r.data.choices?.[0]?.message?.content || '';
+          } catch (e) {
+            lastError = e.response?.data?.error?.message || e.message;
+          }
         }
+
+        if (result) break; // Nếu đã dịch thành công ở model này thì thoát vòng lặp dự phòng
       }
 
       if (!result) {
