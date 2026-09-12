@@ -137,9 +137,9 @@ function renderConfigPage(req, res, savedConfig) {
 
 const defaultManifest = {
   id: 'org.ai.subtitle.pro',
-  version: '1.5.8',
+  version: '1.5.7',
   name: 'AI Subtitle Pro',
-  description: 'Addon phụ đề tự động tiếng Việt thông minh (Gemini + ChatGPT + Phân tích ngữ cảnh chi tiết)',
+  description: 'Addon phụ đề tự động tiếng Việt thông minh (Gemini + ChatGPT + Phân tích ngữ cảnh tập phim)',
   types: ['movie', 'series'],
   catalogs: [],
   resources: ['subtitles'],
@@ -152,7 +152,7 @@ app.get('/manifest.json', (req, res) => res.json(defaultManifest));
 app.get('/:config/manifest.json', (req, res) => res.json(defaultManifest));
 
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v1.5.8',
+  'User-Agent': 'AISubtitlePro v1.5.7',
   'Accept': 'application/json'
 };
 
@@ -197,8 +197,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             const realDownloadUrl = downloadRes.data.link;
             if (!realDownloadUrl) continue;
 
-            // Lấy thông tin chi tiết release name chuẩn xác nhất
-            const originalName = item.attributes.release || subFile.file_name || 'OpenSubtitles File';
+            const originalName = subFile.file_name || item.attributes.release || 'OpenSubtitles File';
 
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
@@ -242,9 +241,7 @@ async function handleSubtitles(req, res, encodedConfig) {
           let dlUrl = sub.url;
           if (dlUrl) {
             if (!dlUrl.startsWith('http')) dlUrl = `https://subdl.com${dlUrl}`;
-            
-            // Lấy tên release chi tiết từ Subdl
-            const originalName = sub.release_name || sub.name || sub.filename || 'Subdl File';
+            const originalName = sub.name || sub.release_name || sub.filename || 'Subdl File';
 
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
@@ -283,9 +280,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             if (!dlUrl.startsWith('http')) {
               dlUrl = `https://subsource.net${dlUrl}`;
             }
-            
-            // Lấy tên release chi tiết từ Subsource
-            const originalName = sub.releaseName || sub.fileName || sub.name || 'Subsource File';
+            const originalName = sub.name || sub.fileName || sub.releaseName || 'Subsource File';
 
             if (['vi', 'vie', 'vietnamese', 'viet'].includes(lang)) {
               subtitles.push({
@@ -332,7 +327,7 @@ app.get('/proxy-sub', async (req, res) => {
   const { url, provider, key } = req.query;
   if (!url) return res.status(400).send('Missing URL');
   try {
-    const headers = { 'User-Agent': 'AISubtitlePro v1.5.8' };
+    const headers = { 'User-Agent': 'AISubtitlePro v1.5.7' };
     if (provider === 'subsource' && key) headers['Authorization'] = `Bearer ${key}`;
     const response = await axios.get(url, { headers, responseType: 'text', timeout: 8000 });
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -358,20 +353,6 @@ function splitSrtIntoChunks(srt, maxChars = 8000) {
   return chunks.length ? chunks : [srt];
 }
 
-// Hàm chuyển thời gian SRT sang mili-giây để sắp xếp chính xác
-function parseTimeToMs(timeStr) {
-  if (!timeStr) return 0;
-  const parts = timeStr.trim().split(':');
-  if (parts.length < 3) return 0;
-  const h = parseInt(parts[0], 10) || 0;
-  const m = parseInt(parts[1], 10) || 0;
-  const sParts = parts[2].split(',');
-  const s = parseInt(sParts[0], 10) || 0;
-  const ms = parseInt(sParts[1], 10) || 0;
-  return h * 3600000 + m * 60000 + s * 1000 + ms;
-}
-
-// Làm sạch và sắp xếp lại mốc thời gian để trị dứt điểm lỗi chồng sub
 function cleanAndRebuildSrt(srtText) {
   const cleaned = srtText.replace(/\r/g, '').trim();
   const blockStrs = cleaned.split(/\n\s*\n/).filter(Boolean);
@@ -394,15 +375,11 @@ function cleanAndRebuildSrt(srtText) {
         entries.push({
           start: start,
           end: end,
-          text: textLines.join('\n'),
-          startMs: parseTimeToMs(start)
+          text: textLines.join('\n')
         });
       }
     }
   }
-
-  // Sắp xếp các đoạn sub theo thời gian bắt đầu từ nhỏ đến lớn để loại bỏ hoàn toàn việc chồng chéo
-  entries.sort((a, b) => a.startMs - b.startMs);
 
   let resultSrt = '';
   for (let i = 0; i < entries.length; i++) {
@@ -470,7 +447,7 @@ app.get('/translate-sub', async (req, res) => {
     let originalSrt;
     try {
       const subResponse = await axios.get(url, {
-        headers: { 'User-Agent': 'AISubtitlePro v1.5.8', 'Accept': 'text/plain, */*' },
+        headers: { 'User-Agent': 'AISubtitlePro v1.5.7', 'Accept': 'text/plain, */*' },
         responseType: 'text',
         timeout: 20000
       });
@@ -498,6 +475,7 @@ app.get('/translate-sub', async (req, res) => {
         if (meta) {
           movieContextStr = `Tên phim: ${meta.name || ''}\nThể loại: ${meta.genres?.join(', ') || ''}\nMô tả chung: ${meta.description || ''}`;
           
+          // Nếu là series, tìm thông tin riêng của tập đang xem (Season / Episode)
           if (type === 'series' && season && episode && Array.isArray(meta.videos)) {
             const currentEp = meta.videos.find(v => v.season === parseInt(season) && v.episode === parseInt(episode));
             if (currentEp) {
@@ -508,14 +486,14 @@ app.get('/translate-sub', async (req, res) => {
       } catch (e) {}
     }
 
-    // 2. Phân tích quy tắc xưng hô từ AI
+    // 2. Cho AI phân tích ngữ cảnh dựa trên thông tin tập phim và mẫu sub
     const sampleText = originalSrt.slice(0, 2000);
     const guidePrompt = `Dựa vào thông tin chi tiết về bộ phim và tập phim dưới đây, kết hợp với mẫu phụ đề, hãy phân tích và thiết lập quy tắc xưng hô tiếng Việt chuẩn xác nhất cho các nhân vật trong tập này:\n\n[THÔNG TIN PHIM & TẬP PHIM]:\n${movieContextStr}\n\n[MẪU PHỤ ĐỀ]:\n${sampleText}\n\nHãy tóm tắt ngắn gọn quy tắc xưng hô và bối cảnh cụ thể của tập này (bằng tiếng Việt):`;
     
     const guideRes = await callAI(guidePrompt, modelOrder, geminiKeys, openaiKey, 30000);
     const pronounGuide = guideRes.result ? `\n\n[QUY TẮC XƯNG HÔ & NGỮ CẢNH CỦA TẬP NÀY]:\n${guideRes.result}` : '';
 
-    // 3. Chia nhỏ phụ đề và dịch đồng thời
+    // 3. Tiến hành chia nhỏ phụ đề và dịch đồng thời
     const chunks = splitSrtIntoChunks(originalSrt, 8000);
 
     const translationPromises = chunks.map(async (chunk, i) => {
@@ -550,3 +528,4 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
+
