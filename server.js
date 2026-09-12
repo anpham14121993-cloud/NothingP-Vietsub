@@ -59,10 +59,10 @@ function renderConfigPage(req, res, savedConfig) {
             <form id="configForm">
                 <label>Mô hình AI dịch ưu tiên:</label>
                 <select id="modelSelect">
-                    <optgroup label="Google Gemini (Mới nhất)">
-                        <option value="gemini-3-flash-preview" ${savedConfig.model === 'gemini-3-flash-preview' ? 'selected' : ''}>Gemini 3 Flash Preview (Khuyên dùng)</option>
-                        <option value="gemini-2.0-flash" ${savedConfig.model === 'gemini-2.0-flash' ? 'selected' : ''}>Gemini 2.0 Flash</option>
+                    <optgroup label="Google Gemini">
+                        <option value="gemini-2.0-flash" ${savedConfig.model === 'gemini-2.0-flash' ? 'selected' : ''}>Gemini 2.0 Flash (Khuyên dùng - Ổn định nhất)</option>
                         <option value="gemini-1.5-flash" ${savedConfig.model === 'gemini-1.5-flash' ? 'selected' : ''}>Gemini 1.5 Flash</option>
+                        <option value="gemini-1.5-pro" ${savedConfig.model === 'gemini-1.5-pro' ? 'selected' : ''}>Gemini 1.5 Pro</option>
                     </optgroup>
                     <optgroup label="OpenAI ChatGPT">
                         <option value="gpt-4o-mini" ${savedConfig.model === 'gpt-4o-mini' ? 'selected' : ''}>ChatGPT: GPT-4o-mini</option>
@@ -141,20 +141,21 @@ function renderConfigPage(req, res, savedConfig) {
 
 const defaultManifest = {
     id: 'org.ai.subtitle.pro',
-    version: '1.5.0',
+    version: '1.5.1',
     name: 'AI Subtitle Pro',
     description: 'Addon phụ đề tự động tiếng Việt (Gemini + ChatGPT + Đa nguồn Sub)',
     types: ['movie', 'series'],
     catalogs: [],
     resources: ['subtitles'],
-    idPrefixes: ['tt']
+    idPrefixes: ['tt'],
+    configurable: true // <--- Giúp hiển thị nút Cấu hình lại trong Stremio
 };
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
 app.get('/:config/manifest.json', (req, res) => res.json(defaultManifest));
 
 const API_HEADERS = {
-    'User-Agent': 'AISubtitlePro v1.5.0',
+    'User-Agent': 'AISubtitlePro v1.5.1',
     'Accept': 'application/json'
 };
 
@@ -169,7 +170,7 @@ async function handleSubtitles(req, res, encodedConfig) {
 
     let subtitles = [];
     const hostUrl = `${req.protocol}://${req.get('host')}`;
-    const modelToUse = config.model || 'gemini-3-flash-preview';
+    const modelToUse = config.model || 'gemini-2.0-flash';
 
     // 1. OpenSubtitles
     if (config.opensubtitlesKey) {
@@ -324,7 +325,7 @@ app.get('/proxy-sub', async (req, res) => {
     if (!url) return res.status(400).send('Missing URL');
 
     try {
-        const headers = { 'User-Agent': 'AISubtitlePro v1.5.0' };
+        const headers = { 'User-Agent': 'AISubtitlePro v1.5.1' };
         if (provider === 'subsource' && key) headers['Authorization'] = `Bearer ${key}`;
 
         const response = await axios.get(url, { headers, responseType: 'text', timeout: 8000 });
@@ -346,12 +347,12 @@ app.get('/translate-sub', async (req, res) => {
     const config = parseConfig(configQuery);
     const geminiKeys = config.geminiKeys || [process.env.GEMINI_API_KEY].filter(Boolean);
     const openaiKey = config.openaiKey || process.env.OPENAI_API_KEY;
-    const selectedModel = model || config.model || 'gemini-3-flash-preview';
+    const selectedModel = model || config.model || 'gemini-2.0-flash';
 
     let originalSrt = "";
     try {
         const subResponse = await axios.get(url, { 
-            headers: { 'User-Agent': 'AISubtitlePro v1.5.0', 'Accept': 'text/plain, */*' }, 
+            headers: { 'User-Agent': 'AISubtitlePro v1.5.1', 'Accept': 'text/plain, */*' }, 
             responseType: 'text', 
             timeout: 8000 
         });
@@ -385,7 +386,7 @@ app.get('/translate-sub', async (req, res) => {
     }
 
     if (!success && geminiKeys.length > 0) {
-        const modelsToTry = [selectedModel, 'gemini-3-flash-preview', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+        const modelsToTry = [selectedModel, 'gemini-2.0-flash', 'gemini-1.5-flash'];
         const uniqueModels = [...new Set(modelsToTry.filter(m => !m.startsWith('gpt-')))];
 
         for (const key of geminiKeys) {
@@ -425,3 +426,4 @@ app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitle
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
+
