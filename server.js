@@ -21,15 +21,24 @@ const SUBTITLE_BROWSER_HEADERS = {
 
 function parseConfig(encodedConfig) {
   if (!encodedConfig || encodedConfig === 'undefined' || encodedConfig === 'null') return {};
-  try {
-    return JSON.parse(Buffer.from(encodedConfig, 'base64').toString('utf8'));
-  } catch {
+  const raw = String(encodedConfig).trim();
+  const variants = [
+    raw,
+    raw.replace(/-/g, '+').replace(/_/g, '/'),
+    decodeURIComponent(raw)
+  ];
+  for (const value of variants) {
     try {
-      return JSON.parse(decodeURIComponent(encodedConfig));
-    } catch {
-      return {};
-    }
+      const padded = value + '='.repeat((4 - (value.length % 4)) % 4);
+      const parsed = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {}
   }
+  try {
+    const parsed = JSON.parse(decodeURIComponent(raw));
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch {}
+  return {};
 }
 
 function escapeHtml(value) {
@@ -121,7 +130,7 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.8',
+  version: '3.9.9',
   name: 'Gemini AI Subtitle Pro',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -133,7 +142,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.8', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.9', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -373,6 +382,12 @@ async function callAI(prompt, geminiKeys, model) {
 
           lastError = message;
           console.error(`[Gemini ${modelName}]`, message);
+
+          if (status === 401 || status === 403 ||
+              /invalid authentication credentials|api key not valid|invalid api key|authentication|unauthorized|permission denied/i.test(message)) {
+            console.warn(`[Gemini ${modelName}] Authentication failure; trying next key/model.`);
+            break;
+          }
 
           if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(message)) {
             rateLimited = true;
@@ -868,7 +883,7 @@ app.get('/subsource-sub/:subtitleId', async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.send(text);
   } catch (err) {
-    console.error('[SubSource download]', err.response?.status || '', err.code || '', err.message);
+    console.error('[VI ORIGINAL SubSource]', err.response?.status || '', err.code || '', err.message);
     res.status(502).send(
       'Không thể tải phụ đề từ SubSource: ' + String(err.message || 'upstream error').slice(0, 180)
     );
@@ -923,7 +938,7 @@ app.get('/proxy-os', async (req, res) => {
       err.message ||
       'upstream error';
 
-    console.error('[OpenSubtitles download]', status, err.code || '', detail);
+    console.error('[VI ORIGINAL OpenSubtitles]', status, err.code || '', detail);
     return res.send('1\n00:00:01,000 --> 00:00:10,000\n[OpenSubtitles] Không thể tải phụ đề gốc: ' + String(detail).replace(/\r?\n/g, ' ').slice(0, 180));
   }
 });
@@ -947,7 +962,7 @@ app.get('/proxy-subdl', async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=3600');
     return res.send(subtitleText);
   } catch (err) {
-    console.error('[SubDL download]', err.response?.status || '', err.code || '', err.message);
+    console.error('[VI ORIGINAL SubDL]', err.response?.status || '', err.code || '', err.message);
     return res.send('1\n00:00:01,000 --> 00:00:10,000\n[SubDL] Không thể tải phụ đề gốc: ' + String(err.message || 'upstream error').replace(/\r?\n/g, ' ').slice(0, 180));
   }
 });
@@ -1007,7 +1022,8 @@ app.get('/ai-test', async (req, res) => {
     return res.json({
       ok: false,
       error: 'Chưa có Gemini API Key',
-      model: requestedModel
+      model: requestedModel,
+      configReceived: !!req.query.config
     });
   }
 
