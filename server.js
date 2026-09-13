@@ -64,7 +64,7 @@ function renderConfigPage(req, res, savedConfig) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cấu hình Gemini AI Subtitle Pro</title>
+<title>Cấu hình NothingP AIOsubtitles</title>
 <style>
 body{background:#121212;color:#fff;font-family:Arial,sans-serif;padding:20px;display:flex;justify-content:center}
 .container{width:100%;max-width:520px;background:#1e1e1e;padding:25px;border-radius:10px;box-shadow:0 4px 15px rgba(0,0,0,0.5)}
@@ -78,7 +78,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.9.19</h2>
+<h2>NothingP AIOsubtitles v3.9.24</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -90,10 +90,10 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 <label>Gemini API Key 2</label><input id="geminiKey2" value="${escapeHtml(geminiKeys[1])}">
 <label>Gemini API Key 3</label><input id="geminiKey3" value="${escapeHtml(geminiKeys[2])}">
 <div style="font-size:12px;color:#aaa;margin-top:8px;line-height:1.45">v3.9.1: 3 Key thuộc 3 Google Project khác nhau sẽ chạy 3 worker dịch song song. Mỗi Project có limiter riêng.</div>
-<div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubSource, SubDL)</div>
+<div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubDL, Subsource)</div>
 <label>OpenSubtitles API Key</label><input id="opensubtitlesKey" value="${escapeHtml(savedConfig.opensubtitlesKey)}">
-<label>SubSource API Key</label><input id="subsourceKey" value="${escapeHtml(savedConfig.subsourceKey)}" placeholder="Nhập SubSource API Key">
 <label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
+<label>SubSource API Key</label><input id="subsourceKey" value="${escapeHtml(savedConfig.subsourceKey)}" placeholder="Nhập SubSource API Key">
 <button type="button" id="installBtn">Cài đặt trực tiếp vào Stremio</button>
 <label style="margin-top:20px">Link Addon:</label><input id="addonUrlOutput" readonly>
 <button type="button" id="copyBtn">📋 Sao chép Link Addon</button>
@@ -105,8 +105,8 @@ function getAddonUrl(){
     model:document.getElementById('modelSelect').value,
     geminiKeys:['geminiKey1','geminiKey2','geminiKey3'].map(id=>document.getElementById(id).value.trim()).filter(Boolean),
     opensubtitlesKey:document.getElementById('opensubtitlesKey').value.trim(),
-    subsourceKey:document.getElementById('subsourceKey').value.trim(),
-    subdlKey:document.getElementById('subdlKey').value.trim()
+    subdlKey:document.getElementById('subdlKey').value.trim(),
+    subsourceKey:document.getElementById('subsourceKey').value.trim()
   };
   return location.origin+'/'+btoa(unescape(encodeURIComponent(JSON.stringify(config))))+'/manifest.json';
 }
@@ -127,8 +127,8 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.19',
-  name: 'Gemini AI Subtitle Pro',
+  version: '3.9.24',
+  name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
   catalogs: [],
@@ -139,7 +139,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.19', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.24', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -295,7 +295,7 @@ function cleanAndRebuildSrt(srtText) {
 // request-start limiter per key so 3 independent projects can work in parallel.
 // Requests on the same key are serialized to avoid bursts across simultaneous
 // subtitle jobs.
-const GEMINI_MIN_INTERVAL_MS = 8000; // ~7.5 request starts/minute per project
+const GEMINI_MIN_INTERVAL_MS = 4500; // ~13.3 request starts/minute per project; leaves headroom under a 15 RPM limit
 const geminiKeyState = new Map();
 
 function getGeminiKeyState(key) {
@@ -510,6 +510,140 @@ function parseRelationshipGuide(raw) {
   return cleaned;
 }
 
+async function fetchImdbWebContext(imdbId, fallbackName = '') {
+  if (!imdbId) return '';
+  try {
+    const id = String(imdbId).replace(/^imdb:/i, '').trim();
+    if (!/^tt\d+$/.test(id)) return '';
+    const url = `https://www.imdb.com/title/${id}/`;
+    const response = await axios.get(url, {
+      timeout: 7000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9'
+      },
+      maxContentLength: 4 * 1024 * 1024
+    });
+    const html = String(response.data || '');
+    if (!html) return '';
+
+    const texts = [];
+    const metaPatterns = [
+      /<meta[^>]+(?:name|property)=['"](?:description|og:description)['"][^>]+content=['"]([^'"]+)['"]/ig,
+      /<meta[^>]+content=['"]([^'"]+)['"][^>]+(?:name|property)=['"](?:description|og:description)['"]/ig
+    ];
+    for (const re of metaPatterns) {
+      let m;
+      while ((m = re.exec(html)) !== null) texts.push(m[1]);
+    }
+
+    // IMDb embeds structured JSON containing title/plot/credits on many title pages.
+    const jsonLdRe = /<script[^>]+type=['"]application\/ld\+json['"][^>]*>([\s\S]*?)<\/script>/ig;
+    let jm;
+    while ((jm = jsonLdRe.exec(html)) !== null) {
+      try {
+        const data = JSON.parse(jm[1].trim());
+        const rows = Array.isArray(data) ? data : [data];
+        for (const row of rows) {
+          if (!row || typeof row !== 'object') continue;
+          if (row.description) texts.push(row.description);
+          if (row.name) texts.push(`Tên: ${row.name}`);
+          if (Array.isArray(row.actor)) {
+            for (const actor of row.actor.slice(0, 30)) {
+              if (actor?.name) texts.push(`Diễn viên: ${actor.name}`);
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // Keep a small text window around IMDb's plot/summary labels when present.
+    const plain = html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+    const needles = ['Plot Summary', 'Plot', 'Storyline', 'Synopsis'];
+    for (const needle of needles) {
+      const at = plain.toLowerCase().indexOf(needle.toLowerCase());
+      if (at >= 0) {
+        texts.push(plain.slice(at, at + 5000));
+        break;
+      }
+    }
+
+    const unique = [...new Set(texts.map(x => String(x).trim()).filter(Boolean))];
+    if (!unique.length) return '';
+    return `IMDb (web, ${id}):\\n${unique.join('\\n').slice(0, 9000)}`;
+  } catch (err) {
+    console.warn('[IMDb web context]', err.message);
+    return '';
+  }
+}
+
+async function fetchWikipediaContext(title, year = '') {
+  const name = String(title || '').trim();
+  if (!name) return '';
+  try {
+    const searchUrl = 'https://en.wikipedia.org/w/rest.php/v1/search/page';
+    const searchRes = await axios.get(searchUrl, {
+      timeout: 7000,
+      params: { q: name, limit: 5 },
+      headers: { 'User-Agent': 'Gemini-AI-Subtitle-Pro/3.9 (subtitle localization)' }
+    });
+    const pages = Array.isArray(searchRes.data?.pages) ? searchRes.data.pages : [];
+    if (!pages.length) return '';
+
+    const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const ranked = pages.slice().sort((a, b) => {
+      const score = p => {
+        const t = String(p?.title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        let n = t === normalized ? 100 : 0;
+        if (year && t.includes(String(year))) n += 5;
+        if (t.includes(normalized) || normalized.includes(t)) n += 20;
+        return n;
+      };
+      return score(b) - score(a);
+    });
+    const pageTitle = ranked[0]?.title;
+    if (!pageTitle) return '';
+
+    const htmlUrl = `https://en.wikipedia.org/w/rest.php/v1/page/${encodeURIComponent(pageTitle)}/html`;
+    const pageRes = await axios.get(htmlUrl, {
+      timeout: 8000,
+      headers: { 'User-Agent': 'Gemini-AI-Subtitle-Pro/3.9 (subtitle localization)' },
+      responseType: 'text'
+    });
+    let html = String(pageRes.data || '');
+    if (!html) return '';
+
+    // Remove navigation/reference-heavy elements, then retain readable article text.
+    html = html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<table[\s\S]*?<\/table>/gi, ' ')
+      .replace(/<sup[\s\S]*?<\/sup>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!html) return '';
+    return `Wikipedia (English): ${pageTitle}\n${html.slice(0, 14000)}`;
+  } catch (err) {
+    console.warn('[Wikipedia context]', err.message);
+    return '';
+  }
+}
+
 async function buildCharacterRelationshipGuide({
   movieContext,
   subtitleSample,
@@ -611,8 +745,6 @@ async function handleSubtitles(req, res, encodedConfig) {
   // 1/2/3. QUÉT 3 NGUỒN SONG SONG
   // OpenSubtitles, SubDL và SubSource được chạy đồng thời.
   // Mỗi nguồn tự bắt lỗi riêng để một nguồn lỗi không chặn 2 nguồn còn lại.
-  // Thứ tự HIỂN THỊ được sắp lại sau khi các nguồn hoàn tất:
-  // OpenSubtitles -> SubSource -> SubDL.
   // ============================================================
 
   const fetchOpenSubtitles = async () => {
@@ -677,7 +809,7 @@ async function handleSubtitles(req, res, encodedConfig) {
           id: `os-en-${item.id}`,
           url: aiUrl,
           lang: 'eng',
-          name: `🇺🇸 [English → Gemini AI Việt] ${releaseName}`
+          name: `🇻🇳 -GEMINI AI ${releaseName}`
         };
       }));
 
@@ -780,7 +912,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             id: `subdl-en-${idPart}`,
             url: aiUrl,
             lang: 'eng',
-            name: `🇺🇸 [English → Gemini AI Việt] ${releaseName}`
+            name: `🇻🇳 -GEMINI AI ${releaseName}`
           });
         }
       }
@@ -843,12 +975,13 @@ async function handleSubtitles(req, res, encodedConfig) {
       };
 
       // Once the movie is identified, VI/EN subtitle searches are also parallel.
-      let [vietnameseSubsRaw, english] = await Promise.all([
-        getSubsourceSubs('vietnamese').catch(() => []),
+      let [viPrimary, viFallback, english] = await Promise.all([
+        getSubsourceSubs('vi').catch(() => []),
+        getSubsourceSubs('vie').catch(() => []),
         getSubsourceSubs('english').catch(() => [])
       ]);
 
-      let vietnameseSubs = vietnameseSubsRaw
+      let vietnameseSubs = [...viPrimary, ...viFallback]
         .filter(sub => isVietnamese(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang));
       let englishSubs = english
         .filter(sub => isEnglish(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang));
@@ -893,7 +1026,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             id: `subsource-en-${sub.subtitleId}`,
             url: aiUrl,
             lang: 'eng',
-            name: `🇺🇸 [English → Gemini AI Việt] ${releaseName}`
+            name: `🇻🇳 -GEMINI AI ${releaseName}`
           });
         }
       }
@@ -931,16 +1064,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   // records point to the same download URL. Keep one AI entry per unique
   // translate URL so the subtitle picker does not show duplicate Gemini items.
   const seenSubtitleKeys = new Set();
-  const providerRank = sub => {
-    const id = String(sub?.id || '').toLowerCase();
-    if (id.startsWith('os-')) return 0;
-    if (id.startsWith('subsource-')) return 1;
-    if (id.startsWith('subdl-')) return 2;
-    return 3;
-  };
-
-  const subtitles = [...nativeVietSubtitles, ...englishOriginalSubtitles]
-    .filter(sub => {
+  const subtitles = [...nativeVietSubtitles, ...englishOriginalSubtitles].filter(sub => {
     const nameKey = String(sub?.name || '').trim().toLowerCase();
     const urlKey = String(sub?.url || '').trim();
     // Prefer URL identity, but also collapse provider duplicates that expose
@@ -949,8 +1073,7 @@ async function handleSubtitles(req, res, encodedConfig) {
     if (seenSubtitleKeys.has(key)) return false;
     seenSubtitleKeys.add(key);
     return true;
-  })
-  .sort((a, b) => providerRank(a) - providerRank(b));
+  });
 
   res.json({ subtitles });
 }
@@ -1476,12 +1599,10 @@ app.get('/translate-sub', async (req, res) => {
           const metaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/${type === 'series' ? 'series' : 'movie'}/${imdbId}.json`, { timeout: 5000 });
           const meta = metaRes.data?.meta;
           if (meta) {
-            const cast = Array.isArray(meta.cast) ? meta.cast.slice(0, 20).join(', ') : '';
             movieContext =
               `Tên phim: ${meta.name || ''}` +
               `\nThể loại: ${Array.isArray(meta.genres) ? meta.genres.join(', ') : ''}` +
-              `\nMô tả: ${meta.description || ''}` +
-              `${cast ? `\nDiễn viên/nhân vật được Cinemeta cung cấp: ${cast}` : ''}`;
+              `\nMô tả Cinemeta: ${meta.description || ''}`;
 
             if (type === 'series' && season && episode && Array.isArray(meta.videos)) {
               const ep = meta.videos.find(v =>
@@ -1491,31 +1612,60 @@ app.get('/translate-sub', async (req, res) => {
               if (ep) {
                 movieContext +=
                   `\nTập ${season}x${episode}: ${ep.name || ''}` +
-                  `\nTóm tắt tập: ${ep.overview || ''}`;
+                  `\nTóm tắt tập từ Cinemeta: ${ep.overview || ''}`;
               }
             }
+
+            const imdbWeb = await fetchImdbWebContext(imdbId, meta.name || '');
+            if (imdbWeb) movieContext += `\n\n${imdbWeb}`;
+
+            const wiki = await fetchWikipediaContext(meta.name || '', meta.year || '');
+            if (wiki) movieContext += `\n\n${wiki}`;
           }
         } catch (err) {
-          console.error('[Cinemeta context]', err.message);
+          console.error('[Movie web context]', err.message);
         }
       }
 
-      // v3.9.7: remove the separate relationship-guide Gemini call from the
-      // request path. It added a full extra model request before translation and
-      // made the click-to-translate HTTP request unnecessarily long. Instead,
-      // each translation worker receives a compact dialogue/context sample and
-      // is instructed to infer relationships conservatively from that evidence.
-      const subtitleSample = buildSubtitleContextSample(originalSrt, 4500);
+      // v3.9.23: build a structured movie/setting/character/relationship guide
+      // BEFORE subtitle translation. The guide is generated once per translation
+      // job, then reused by every translation chunk for consistent localization.
+      const subtitleSample = buildSubtitleContextSample(originalSrt, 9000);
+      let relationshipGuide = '';
+      try {
+        relationshipGuide = await buildCharacterRelationshipGuide({
+          movieContext,
+          subtitleSample,
+          geminiKeys,
+          model: modelToUse
+        });
+        if (relationshipGuide) {
+          console.log(`📚 [Character Guide] Đã tạo sổ tay thông tin phim/nhân vật/quan hệ (${relationshipGuide.length.toLocaleString()} ký tự)`);
+        } else {
+          console.warn('[Character Guide] Không tạo được guide; tiếp tục dịch với metadata + mẫu thoại.');
+        }
+      } catch (err) {
+        console.warn('[Character Guide] lỗi, bỏ qua guide:', err.message);
+      }
+
       const contextGuide = `
 
-  [NGỮ CẢNH NHÂN VẬT & XƯNG HÔ]
-  Thông tin phim:
+  [BẢNG THÔNG TIN PHIM & SỔ TAY NHÂN VẬT]
+  Thông tin phim từ Cinemeta/IMDb/Wikipedia:
   ${movieContext}
+
+  Bảng phân tích nhân vật, bối cảnh, quan hệ và xưng hô (do AI xây dựng từ dữ liệu ở trên):
+  ${relationshipGuide || 'Chưa có bảng phân tích; chỉ sử dụng thông tin phim và mẫu thoại làm bằng chứng.'}
 
   Mẫu thoại tham chiếu:
   ${subtitleSample}
 
-  Hãy suy luận tuổi/vai vế/quan hệ và cách xưng hô chỉ khi có bằng chứng; nếu chưa rõ, chọn cách xưng hô trung tính, tự nhiên và nhất quán. Không tự bịa quan hệ.`;
+  QUY TẮC SỬ DỤNG BẢNG:
+  - Bảng là ngữ cảnh tham chiếu, không phải nội dung cần dịch.
+  - Ưu tiên quan hệ/xưng hô có confidence cao; với medium/low chỉ dùng khi không có bằng chứng mâu thuẫn rõ ràng.
+  - Không tự bịa quan hệ, tuổi, vai vế hoặc bối cảnh chưa được nguồn/bằng chứng hỗ trợ.
+  - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
+  - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
       const chunks = splitSrtIntoChunks(originalSrt, 14000);
       const translated = [];
@@ -1676,7 +1826,7 @@ app.get('/:config/subtitles/:type/:id.json', (req, res) => handleSubtitles(req, 
 app.get('/:config/subtitles/:type/:id/:extra.json', (req, res) => handleSubtitles(req, res, req.params.config));
 
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Gemini AI Subtitle Pro đang chạy tại port ${PORT}`);
+  console.log(`NothingP AIOsubtitles đang chạy tại port ${PORT}`);
 });
 
 // Render's edge proxy can return 502 when a Node request/connection is
