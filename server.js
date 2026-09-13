@@ -78,7 +78,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.24</h2>
+<h2>NothingP AIOsubtitles v3.9.27</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -90,10 +90,10 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 <label>Gemini API Key 2</label><input id="geminiKey2" value="${escapeHtml(geminiKeys[1])}">
 <label>Gemini API Key 3</label><input id="geminiKey3" value="${escapeHtml(geminiKeys[2])}">
 <div style="font-size:12px;color:#aaa;margin-top:8px;line-height:1.45">v3.9.1: 3 Key thuộc 3 Google Project khác nhau sẽ chạy 3 worker dịch song song. Mỗi Project có limiter riêng.</div>
-<div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubDL, Subsource)</div>
+<div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubSource, SubDL)</div>
 <label>OpenSubtitles API Key</label><input id="opensubtitlesKey" value="${escapeHtml(savedConfig.opensubtitlesKey)}">
-<label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
 <label>SubSource API Key</label><input id="subsourceKey" value="${escapeHtml(savedConfig.subsourceKey)}" placeholder="Nhập SubSource API Key">
+<label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
 <button type="button" id="installBtn">Cài đặt trực tiếp vào Stremio</button>
 <label style="margin-top:20px">Link Addon:</label><input id="addonUrlOutput" readonly>
 <button type="button" id="copyBtn">📋 Sao chép Link Addon</button>
@@ -125,9 +125,19 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 </html>`);
 }
 
+// v3.9.27: deterministic provider order for the configuration page.
+// This is separate from the subtitle-picker order.
+const CONFIG_PROVIDER_ORDER = ['os', 'subsource', 'subdl'];
+const configProviderRank = value => {
+  const id = String(value || '').toLowerCase();
+  return CONFIG_PROVIDER_ORDER.indexOf(id) >= 0
+    ? CONFIG_PROVIDER_ORDER.indexOf(id)
+    : CONFIG_PROVIDER_ORDER.length;
+};
+
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.24',
+  version: '3.9.27',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -139,7 +149,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.24', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.27', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -1064,6 +1074,17 @@ async function handleSubtitles(req, res, encodedConfig) {
   // records point to the same download URL. Keep one AI entry per unique
   // translate URL so the subtitle picker does not show duplicate Gemini items.
   const seenSubtitleKeys = new Set();
+  // Force subtitle picker order: OpenSubtitles -> SubSource -> SubDL.
+  // The provider fetches run in parallel, so Promise.allSettled completion/order
+  // must never determine the order shown to Stremio/Nuvio.
+  const providerRank = sub => {
+    const id = String(sub?.id || '').toLowerCase();
+    if (id.startsWith('os-')) return 0;
+    if (id.startsWith('subsource-')) return 1;
+    if (id.startsWith('subdl-')) return 2;
+    return 3;
+  };
+
   const subtitles = [...nativeVietSubtitles, ...englishOriginalSubtitles].filter(sub => {
     const nameKey = String(sub?.name || '').trim().toLowerCase();
     const urlKey = String(sub?.url || '').trim();
@@ -1074,6 +1095,13 @@ async function handleSubtitles(req, res, encodedConfig) {
     seenSubtitleKeys.add(key);
     return true;
   });
+
+  subtitles.sort((a, b) => providerRank(a) - providerRank(b));
+
+  console.log('[Subtitles order]', subtitles.map(sub => ({
+    id: sub?.id || '',
+    name: sub?.name || ''
+  })));
 
   res.json({ subtitles });
 }
@@ -1637,7 +1665,9 @@ app.get('/translate-sub', async (req, res) => {
           movieContext,
           subtitleSample,
           geminiKeys,
-          model: modelToUse
+          // The translation route uses `selectedModel`; `modelToUse` only
+          // exists in the subtitle-listing handler and is out of scope here.
+          model: selectedModel
         });
         if (relationshipGuide) {
           console.log(`📚 [Character Guide] Đã tạo sổ tay thông tin phim/nhân vật/quan hệ (${relationshipGuide.length.toLocaleString()} ký tự)`);
