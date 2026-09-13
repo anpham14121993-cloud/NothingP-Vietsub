@@ -90,10 +90,10 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 <label>Gemini API Key 2</label><input id="geminiKey2" value="${escapeHtml(geminiKeys[1])}">
 <label>Gemini API Key 3</label><input id="geminiKey3" value="${escapeHtml(geminiKeys[2])}">
 <div style="font-size:12px;color:#aaa;margin-top:8px;line-height:1.45">v3.9.1: 3 Key thuộc 3 Google Project khác nhau sẽ chạy 3 worker dịch song song. Mỗi Project có limiter riêng.</div>
-<div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubDL, Subsource)</div>
+<div class="section-title">📥 Nguồn phụ đề (OpenSubtitles, SubSource, SubDL)</div>
 <label>OpenSubtitles API Key</label><input id="opensubtitlesKey" value="${escapeHtml(savedConfig.opensubtitlesKey)}">
-<label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
 <label>SubSource API Key</label><input id="subsourceKey" value="${escapeHtml(savedConfig.subsourceKey)}" placeholder="Nhập SubSource API Key">
+<label>SubDL API Key</label><input id="subdlKey" value="${escapeHtml(savedConfig.subdlKey)}">
 <button type="button" id="installBtn">Cài đặt trực tiếp vào Stremio</button>
 <label style="margin-top:20px">Link Addon:</label><input id="addonUrlOutput" readonly>
 <button type="button" id="copyBtn">📋 Sao chép Link Addon</button>
@@ -105,8 +105,8 @@ function getAddonUrl(){
     model:document.getElementById('modelSelect').value,
     geminiKeys:['geminiKey1','geminiKey2','geminiKey3'].map(id=>document.getElementById(id).value.trim()).filter(Boolean),
     opensubtitlesKey:document.getElementById('opensubtitlesKey').value.trim(),
-    subdlKey:document.getElementById('subdlKey').value.trim(),
-    subsourceKey:document.getElementById('subsourceKey').value.trim()
+    subsourceKey:document.getElementById('subsourceKey').value.trim(),
+    subdlKey:document.getElementById('subdlKey').value.trim()
   };
   return location.origin+'/'+btoa(unescape(encodeURIComponent(JSON.stringify(config))))+'/manifest.json';
 }
@@ -611,6 +611,8 @@ async function handleSubtitles(req, res, encodedConfig) {
   // 1/2/3. QUÉT 3 NGUỒN SONG SONG
   // OpenSubtitles, SubDL và SubSource được chạy đồng thời.
   // Mỗi nguồn tự bắt lỗi riêng để một nguồn lỗi không chặn 2 nguồn còn lại.
+  // Thứ tự HIỂN THỊ được sắp lại sau khi các nguồn hoàn tất:
+  // OpenSubtitles -> SubSource -> SubDL.
   // ============================================================
 
   const fetchOpenSubtitles = async () => {
@@ -841,13 +843,12 @@ async function handleSubtitles(req, res, encodedConfig) {
       };
 
       // Once the movie is identified, VI/EN subtitle searches are also parallel.
-      let [viPrimary, viFallback, english] = await Promise.all([
-        getSubsourceSubs('vi').catch(() => []),
-        getSubsourceSubs('vie').catch(() => []),
+      let [vietnameseSubsRaw, english] = await Promise.all([
+        getSubsourceSubs('vietnamese').catch(() => []),
         getSubsourceSubs('english').catch(() => [])
       ]);
 
-      let vietnameseSubs = [...viPrimary, ...viFallback]
+      let vietnameseSubs = vietnameseSubsRaw
         .filter(sub => isVietnamese(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang));
       let englishSubs = english
         .filter(sub => isEnglish(sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang));
@@ -930,7 +931,16 @@ async function handleSubtitles(req, res, encodedConfig) {
   // records point to the same download URL. Keep one AI entry per unique
   // translate URL so the subtitle picker does not show duplicate Gemini items.
   const seenSubtitleKeys = new Set();
-  const subtitles = [...nativeVietSubtitles, ...englishOriginalSubtitles].filter(sub => {
+  const providerRank = sub => {
+    const id = String(sub?.id || '').toLowerCase();
+    if (id.startsWith('os-')) return 0;
+    if (id.startsWith('subsource-')) return 1;
+    if (id.startsWith('subdl-')) return 2;
+    return 3;
+  };
+
+  const subtitles = [...nativeVietSubtitles, ...englishOriginalSubtitles]
+    .filter(sub => {
     const nameKey = String(sub?.name || '').trim().toLowerCase();
     const urlKey = String(sub?.url || '').trim();
     // Prefer URL identity, but also collapse provider duplicates that expose
@@ -939,7 +949,8 @@ async function handleSubtitles(req, res, encodedConfig) {
     if (seenSubtitleKeys.has(key)) return false;
     seenSubtitleKeys.add(key);
     return true;
-  });
+  })
+  .sort((a, b) => providerRank(a) - providerRank(b));
 
   res.json({ subtitles });
 }
