@@ -11,7 +11,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.9.5',
+  'User-Agent': 'AISubtitlePro v3.9.6',
   Accept: 'application/json'
 };
 const SUBTITLE_BROWSER_HEADERS = {
@@ -69,7 +69,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.9.5</h2>
+<h2>Gemini AI Subtitle Pro v3.9.6</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -121,7 +121,7 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.5',
+  version: '3.9.6',
   name: 'Gemini AI Subtitle Pro',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -133,7 +133,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.5', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.6', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -186,9 +186,32 @@ function extractSubtitleText(buffer) {
   return selected.getData().toString('utf8').replace(/^\uFEFF/, '');
 }
 
-async function fetchSubtitleText(url, headers = {}, timeout = 30000) {
-  const response = await axios.get(url, { headers, responseType: 'arraybuffer', timeout, maxRedirects: 5 });
-  return extractSubtitleText(Buffer.from(response.data));
+async function fetchSubtitleText(url, headers = {}, timeout = 30000, retries = 2) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await axios.get(url, {
+        headers,
+        responseType: 'arraybuffer',
+        timeout,
+        maxRedirects: 5,
+        validateStatus: status => status >= 200 && status < 300
+      });
+      return extractSubtitleText(Buffer.from(response.data));
+    } catch (err) {
+      lastError = err;
+      const status = err.response?.status;
+      const retryable =
+        !status || status === 408 || status === 425 || status === 429 ||
+        status >= 500 ||
+        /ECONNRESET|ETIMEDOUT|ECONNABORTED|EAI_AGAIN|socket hang up/i.test(
+          String(err.code || '') + ' ' + String(err.message || '')
+        );
+      if (!retryable || attempt >= retries) break;
+      await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+    }
+  }
+  throw lastError || new Error('Không tải được phụ đề.');
 }
 
 function getSubsourceHeaders(apiKey) {
@@ -548,22 +571,15 @@ async function handleSubtitles(req, res, encodedConfig) {
         const lang = item.attributes?.language || '';
         if (!file?.file_id) return null;
 
-        const download = await axios.post(
-          'https://api.opensubtitles.com/api/v1/download',
-          { file_id: file.file_id },
-          {
-            headers: { 'Api-Key': apiKeyOS, ...API_HEADERS, 'Content-Type': 'application/json' },
-            timeout: 7000
-          }
-        );
-        if (!download?.data?.link) return null;
-
         const releaseName = item.attributes?.release || file.file_name || 'OpenSubtitles Sub';
         const isVi = isVietnamese(lang);
-        // Do not expose the temporary OpenSubtitles download URL to Stremio.
-        // Keep the API-key-backed download behind our server. This also makes
-        // both native VI and English->Gemini use the same authenticated path.
-        const sourceUrl = `${hostUrl}/proxy-os?link=${encodeURIComponent(download.data.link)}`;
+
+        // IMPORTANT: defer the authenticated OpenSubtitles /download call
+        // until the user actually opens the subtitle. Doing it here makes
+        // /subtitles slow and can cause the entire Stremio request to 502.
+        const sourceUrl =
+          `${hostUrl}/proxy-os?fileId=${encodeURIComponent(file.file_id)}` +
+          `&config=${encodeURIComponent(encodedConfig || '')}`;
         if (isVi) {
           return {
             id: `os-vi-${item.id}`,
@@ -666,7 +682,9 @@ async function handleSubtitles(req, res, encodedConfig) {
         const releaseName = subtitleName(sub, 'SubDL Sub');
         const idPart = sub.file_n_id || sub.n_id || sub.nId || sub.id || Math.random().toString(36).slice(2);
 
-        const sourceUrl = `${hostUrl}/proxy-subdl?url=${encodeURIComponent(dlUrl)}&key=${encodeURIComponent(apiKeySubDL)}`;
+        const sourceUrl =
+          `${hostUrl}/proxy-subdl?url=${encodeURIComponent(dlUrl)}` +
+          `&config=${encodeURIComponent(encodedConfig || '')}`;
         if (vi && isVietnamese(lang)) {
           native.push({
             id: `subdl-vi-${idPart}`,
@@ -771,7 +789,7 @@ async function handleSubtitles(req, res, encodedConfig) {
           : (sub.releaseInfo || sub.productionType || 'SubSource');
         const downloadUrl =
           `${hostUrl}/subsource-sub/${encodeURIComponent(sub.subtitleId)}` +
-          `?key=${encodeURIComponent(config.subsourceKey)}`;
+          `?config=${encodeURIComponent(encodedConfig || '')}`;
         const subLanguage = sub.language ?? sub.languageCode ?? sub.language_code ?? sub.lang;
 
         if (isViSelected && isVietnamese(subLanguage)) {
@@ -835,7 +853,8 @@ async function handleSubtitles(req, res, encodedConfig) {
 
 app.get('/subsource-sub/:subtitleId', async (req, res) => {
   const { subtitleId } = req.params;
-  const apiKey = String(req.query.key || '');
+  const config = parseConfig(req.query.config || '');
+  const apiKey = String(config.subsourceKey || '');
 
   if (!subtitleId) return res.status(400).send('Missing subtitle ID');
   if (!apiKey) return res.status(401).send('Missing SubSource API Key');
@@ -843,44 +862,92 @@ app.get('/subsource-sub/:subtitleId', async (req, res) => {
   try {
     const text = await fetchSubsourceSubtitleText(subtitleId, apiKey);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
     res.send(text);
   } catch (err) {
-    console.error('[SubSource download]', err.response?.status || '', err.message);
-    res.status(502).send('Không thể tải phụ đề từ SubSource.');
+    console.error('[SubSource download]', err.response?.status || '', err.code || '', err.message);
+    res.status(502).send(
+      'Không thể tải phụ đề từ SubSource: ' + String(err.message || 'upstream error').slice(0, 180)
+    );
   }
 });
 
 app.get('/proxy-os', async (req, res) => {
-  const link = String(req.query.link || '');
-  if (!link) return res.status(400).send('Missing OpenSubtitles download link');
+  const fileId = String(req.query.fileId || '');
+  const directLink = String(req.query.link || '');
+  const config = parseConfig(req.query.config || '');
+  const apiKeyOS = config.opensubtitlesKey || '2015';
+
+  if (!fileId && !directLink) {
+    return res.status(400).send('Missing OpenSubtitles file ID');
+  }
+
   try {
-    const text = await fetchSubtitleText(link, SUBTITLE_BROWSER_HEADERS, 30000);
+    let link = directLink;
+
+    // Authenticated download is intentionally deferred until subtitle click.
+    if (!link && fileId) {
+      const download = await axios.post(
+        'https://api.opensubtitles.com/api/v1/download',
+        { file_id: fileId },
+        {
+          headers: {
+            'Api-Key': apiKeyOS,
+            ...API_HEADERS,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000,
+          validateStatus: status => status >= 200 && status < 300
+        }
+      );
+
+      link = download.data?.link || '';
+      if (!link) {
+        throw new Error(`OpenSubtitles /download không trả link (HTTP ${download.status || 'unknown'}).`);
+      }
+    }
+
+    const subtitleText = await fetchSubtitleText(link, SUBTITLE_BROWSER_HEADERS, 30000, 2);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    return res.send(text);
+    return res.send(subtitleText);
   } catch (err) {
-    console.error('[OpenSubtitles download]', err.response?.status || '', err.code || '', err.message);
-    return res.status(502).send('Không thể tải phụ đề OpenSubtitles.');
+    const status = err.response?.status || '';
+    const detail =
+      err.response?.data?.message ||
+      err.response?.data?.errors?.[0]?.message ||
+      err.message ||
+      'upstream error';
+
+    console.error('[OpenSubtitles download]', status, err.code || '', detail);
+    return res.status(502).send(
+      'Không thể tải phụ đề OpenSubtitles: ' + String(detail).slice(0, 180)
+    );
   }
 });
 
 app.get('/proxy-subdl', async (req, res) => {
   const url = String(req.query.url || '');
-  const key = String(req.query.key || '');
+  const config = parseConfig(req.query.config || '');
+  const key = String(config.subdlKey || '');
+
   if (!url) return res.status(400).send('Missing SubDL URL');
   if (!key) return res.status(401).send('Missing SubDL API Key');
+
   try {
-    const text = await fetchSubtitleText(url, {
+    const subtitleText = await fetchSubtitleText(url, {
       ...SUBTITLE_BROWSER_HEADERS,
       'X-API-Key': key,
       'Authorization': `Bearer ${key}`
-    }, 30000);
+    }, 30000, 2);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    return res.send(text);
+    return res.send(subtitleText);
   } catch (err) {
     console.error('[SubDL download]', err.response?.status || '', err.code || '', err.message);
-    return res.status(502).send('Không thể tải phụ đề SubDL.');
+    return res.status(502).send(
+      'Không thể tải phụ đề SubDL: ' + String(err.message || 'upstream error').slice(0, 180)
+    );
   }
 });
 
@@ -993,26 +1060,10 @@ app.get('/translate-sub', async (req, res) => {
   const { url, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
 
-  // Render's edge can return 502 if a long Gemini request stays completely
-  // idle while the server is waiting for Gemini. Send a tiny whitespace
-  // heartbeat every 10s during the long-running translation job. The bytes
-  // are harmless to SRT (they are outside any subtitle block).
-  let keepAliveTimer = null;
-  const startKeepAlive = () => {
-    if (keepAliveTimer) return;
-    try { res.flushHeaders(); } catch {}
-    keepAliveTimer = setInterval(() => {
-      try {
-        if (!res.writableEnded && !res.destroyed) res.write('\n');
-      } catch {}
-    }, 10000);
-  };
-  const stopKeepAlive = () => {
-    if (keepAliveTimer) {
-      clearInterval(keepAliveTimer);
-      keepAliveTimer = null;
-    }
-  };
+  // Do not inject heartbeat bytes into SRT. Some subtitle parsers are
+  // strict and can treat them as malformed subtitle data.
+  const startKeepAlive = () => {};
+  const stopKeepAlive = () => {};
 
   if (!url) return res.send('1\n00:00:01,000 --> 00:00:05,000\n[LỖI]: Thiếu đường dẫn file phụ đề.');
 
@@ -1081,18 +1132,14 @@ app.get('/translate-sub', async (req, res) => {
 
     let originalSrt;
     try {
-      const subsourceMatch = String(url).match(
-        /^https?:\/\/[^/]+\/subsource-sub\/([^?]+)\?key=([^&]+)/
+      // Provider proxy routes resolve their own API credentials. Translation
+      // only needs to fetch the generated subtitle URL.
+      originalSrt = await fetchSubtitleText(
+        url,
+        SUBTITLE_BROWSER_HEADERS,
+        30000,
+        2
       );
-
-      if (subsourceMatch) {
-        originalSrt = await fetchSubsourceSubtitleText(
-          decodeURIComponent(subsourceMatch[1]),
-          decodeURIComponent(subsourceMatch[2])
-        );
-      } else {
-        originalSrt = await fetchSubtitleText(url);
-      }
     } catch (err) {
       throw new Error('Không tải được file phụ đề tiếng Anh.');
     }
@@ -1262,4 +1309,3 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
-
