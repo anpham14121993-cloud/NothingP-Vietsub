@@ -1078,8 +1078,38 @@ const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TRANSLATION_CACHE_MAX = 40;
 const translationInFlight = new Map();
 
-function makeTranslationCacheKey({ url, model, imdbId, type, season, episode }) {
-  return [url, model || '', imdbId || '', type || '', season || '', episode || ''].join('|');
+function makeTranslationCacheKey({
+  url,
+  provider,
+  fileId,
+  sourceUrl,
+  subtitleId,
+  model,
+  imdbId,
+  type,
+  season,
+  episode
+}) {
+  // Use the subtitle's logical identity first. Stremio/Android can request
+  // the same subtitle more than once and the provider URL may vary between
+  // requests, so URL-only keys can fail to deduplicate those requests.
+  const logicalSource =
+    provider === 'os'
+      ? `os:file:${fileId || ''}`
+      : provider === 'subdl'
+        ? `subdl:${sourceUrl || url || ''}`
+        : provider === 'subsource'
+          ? `subsource:${subtitleId || ''}`
+          : `url:${url || sourceUrl || ''}`;
+
+  return [
+    logicalSource,
+    model || '',
+    imdbId || '',
+    type || '',
+    season || '',
+    episode || ''
+  ].join('|');
 }
 
 function getCachedTranslation(key) {
@@ -1129,7 +1159,14 @@ app.get('/translate-sub', async (req, res) => {
 
   try {
     const config = parseConfig(configQuery);
-    console.log('[translate-sub start]', JSON.stringify({ provider: provider || 'legacy', model: model || config.model || 'gemini-3.5-flash-lite', imdbId: imdbId || '', type: type || '', season: season || '', episode: episode || '' }));
+    console.log('[translate-sub request]', JSON.stringify({
+      provider: provider || 'legacy',
+      model: model || config.model || 'gemini-3.5-flash-lite',
+      imdbId: imdbId || '',
+      type: type || '',
+      season: season || '',
+      episode: episode || ''
+    }));
     const geminiKeys = (config.geminiKeys && config.geminiKeys.length > 0)
       ? config.geminiKeys
       : [process.env.GEMINI_API_KEY].filter(Boolean);
@@ -1139,11 +1176,22 @@ app.get('/translate-sub', async (req, res) => {
     }
 
     const selectedModel = model || config.model || 'gemini-3.5-flash-lite';
-    const sourceCacheId = url || `${provider || ''}|${fileId || ''}|${sourceUrl || ''}|${subtitleId || ''}`;
-    cacheKey = makeTranslationCacheKey({ url: sourceCacheId, model: selectedModel, imdbId, type, season, episode });
+    cacheKey = makeTranslationCacheKey({
+      url,
+      provider,
+      fileId,
+      sourceUrl,
+      subtitleId,
+      model: selectedModel,
+      imdbId,
+      type,
+      season,
+      episode
+    });
 
     const cachedSrt = getCachedTranslation(cacheKey);
     if (cachedSrt) {
+      console.log('[translate-sub CACHE HIT]', cacheKey.slice(0, 180));
       res.setHeader('Cache-Control', 'public, max-age=21600');
       return res.send(cachedSrt);
     }
@@ -1153,6 +1201,7 @@ app.get('/translate-sub', async (req, res) => {
     // of starting another 3-project Gemini translation.
     const existingJob = translationInFlight.get(cacheKey);
     if (existingJob) {
+      console.log('[translate-sub REUSE JOB]', cacheKey.slice(0, 180));
       startKeepAlive();
       try {
         const readySrt = await existingJob;
@@ -1173,6 +1222,7 @@ app.get('/translate-sub', async (req, res) => {
     });
     translationInFlight.set(cacheKey, currentJob);
     ownsTranslationJob = true;
+    console.log('[translate-sub NEW JOB]', cacheKey.slice(0, 180));
     startKeepAlive();
 
     let originalSrt;
@@ -1373,6 +1423,7 @@ ${chunks[i]}`;
   } finally {
     if (ownsTranslationJob && cacheKey) {
       translationInFlight.delete(cacheKey);
+      console.log('[translate-sub JOB RELEASED]', cacheKey.slice(0, 180));
     }
   }
 });
@@ -1392,3 +1443,4 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
+
