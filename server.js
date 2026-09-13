@@ -1265,13 +1265,12 @@ function writeLiveStatus(res, state, force = false) {
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
 
-  // AUTO-SHOW SAME-TRACK FLOW:
-  // Request #1 starts translation and keeps the SAME HTTP request open.
-  // When translation finishes, this SAME request receives the FINAL Vietnamese SRT.
-  // This avoids the old temporary-status response that many clients keep displayed.
-  // If a client disconnects/times out, the completed result remains in the cache
-  // and a later request to this SAME URL receives the final SRT.
-  // No second Gemini track is created and subtitle `lang` is not changed.
+  // SAME-TRACK / TWO-REQUEST FLOW:
+  // Request #1 on the selected Gemini track -> return a temporary status SRT
+  // immediately and start translation in the background.
+  // A later request to the SAME track URL -> return the cached final Vietnamese SRT.
+  // No second Gemini track is created and no subtitle `lang` declaration is changed.
+  // Do not stream progress through res.write(); Stremio may cache/buffer the first SRT.
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
@@ -1643,30 +1642,15 @@ app.get('/translate-sub', async (req, res) => {
       console.error('[translate-sub background detached]', err);
     });
 
-    // AUTO-SHOW:
-    // Keep the FIRST subtitle HTTP request open until the background job finishes,
-    // then return the FINAL Vietnamese SRT on this SAME selected track.
-    // The background job never writes to res; it only resolves jobEntry.promise.
-    // If the client disconnects/times out, translation continues and the final SRT
-    // remains available through the same stable URL/cache.
-    console.log('[translate-sub REQUEST #1] Đang giữ request mở chờ FINAL SRT...');
-    try {
-      const finalResult = await jobEntry.promise;
-      console.log('[translate-sub REQUEST #1] FINAL SRT trả về trên CHÍNH track này');
-      return res.send(finalResult);
-    } catch (waitErr) {
-      console.error('[translate-sub REQUEST #1 wait]', waitErr.message || waitErr);
-      const cachedAfterWait = getCachedTranslation(cacheKey);
-      if (cachedAfterWait) return res.send(cachedAfterWait);
-      return res.send(
-        makeStatusSrt(
-          1,
-          0,
-          30000,
-          '❌ Gemini AI chưa hoàn tất: ' + String(waitErr.message || waitErr)
-        )
-      );
-    }
+    // Request #1 ends immediately with a temporary, valid SRT.
+    return res.send(
+      makeStatusSrt(
+        1,
+        0,
+        30000,
+        '🟡 Gemini AI đang dịch phụ đề...\n⏱️ Dự kiến khoảng 30 giây.\n🔄 Hãy mở lại phụ đề sau khi dịch hoàn tất.'
+      )
+    );
   } catch (err) {
     console.error('[translate-sub setup]', err.stack || err.message || err);
     return res.send(
@@ -1690,7 +1674,4 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
-// v3.9.20 AUTO-SHOW: the first Gemini subtitle request waits for the final SRT
-// and returns it on the same selected subtitle track.
-console.log('Gemini AI Subtitle Pro v3.9.20 AUTO-SHOW: chờ FINAL SRT trên cùng track');
 
