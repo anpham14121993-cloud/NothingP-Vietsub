@@ -294,7 +294,7 @@ function cleanAndRebuildSrt(srtText) {
 // request-start limiter per key so 3 independent projects can work in parallel.
 // Requests on the same key are serialized to avoid bursts across simultaneous
 // subtitle jobs.
-const GEMINI_MIN_INTERVAL_MS = 4500; // ~13.3 request starts/minute per project
+const GEMINI_MIN_INTERVAL_MS = 8000; // ~7.5 request starts/minute per project
 const geminiKeyState = new Map();
 
 function getGeminiKeyState(key) {
@@ -393,10 +393,18 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           break;
         }
 
+        // Gemini "high demand" is usually model-side capacity pressure, not a
+        // temporary network failure. Retrying the same key wastes time and can
+        // make the request queue longer, so move to the next project/key immediately.
+        if (/high demand/i.test(message)) {
+          console.warn(`[Gemini ${selectedModel}] key #${keyIndex + 1} high-demand response; immediately trying next key on SAME model.`);
+          break;
+        }
+
         if (
           status === 408 || status === 425 || status === 500 || status === 502 ||
           status === 503 || status === 504 ||
-          /high demand|temporarily unavailable|timeout|timed out|ECONNRESET|ETIMEDOUT/i.test(message)
+          /temporarily unavailable|timeout|timed out|ECONNRESET|ETIMEDOUT/i.test(message)
         ) {
           if (!transientRetried) {
             transientRetried = true;
@@ -1277,9 +1285,9 @@ Hãy suy luận tuổi/vai vế/quan hệ và cách xưng hô chỉ khi có bằ
     const translated = [];
 
     // Three workers use the three independent Google projects to reduce wall-clock time
-    // themselves take longer than the 4.5s global request-start interval.
+    // themselves take longer than the 8s per-project request-start interval.
     // The limiter in callAI() still guarantees that Gemini request starts are
-    // spaced at least 4.5s apart per project, so each project stays around 13 RPM.
+    // spaced at least 8s apart per project, so each project stays around 7.5 RPM.
     const translateChunk = async (i, workerKey) => {
       const prompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
@@ -1384,4 +1392,3 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
-
