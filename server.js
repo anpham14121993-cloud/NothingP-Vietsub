@@ -592,6 +592,14 @@ async function handleSubtitles(req, res, encodedConfig) {
   const hostUrl = makeHostUrl(req);
   const modelToUse = config.model || 'gemini-3.5-flash-lite';
 
+  // Cache-buster for Stremio's subtitle URL cache. Older versions of this
+  // addon returned a temporary "đang dịch..." SRT from the same URL. Stremio
+  // can keep that old response locally even after the server has the translated
+  // SRT. A fresh version token makes every newly generated AI subtitle URL a
+  // different client-side resource, while the server-side translation cache
+  // deliberately ignores this token and still reuses the completed translation.
+  const aiUrlVersion = Date.now().toString(36);
+
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
   let englishSubtitlesForAI = [];
@@ -659,7 +667,7 @@ async function handleSubtitles(req, res, encodedConfig) {
 
         // IMPORTANT: The English track itself is the trigger for Gemini.
         // Stremio only requests this URL after the user selects the English subtitle.
-        const aiUrl = `${hostUrl}/translate-sub?provider=os&fileId=${encodeURIComponent(file.file_id)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
+        const aiUrl = `${hostUrl}/translate-sub?provider=os&fileId=${encodeURIComponent(file.file_id)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
         return {
           id: `os-en-${item.id}`,
           url: aiUrl,
@@ -762,7 +770,7 @@ async function handleSubtitles(req, res, encodedConfig) {
           });
         } else if (!vi && isEnglish(lang)) {
           // Selecting the English subtitle triggers EN -> VI translation.
-          const aiUrl = `${hostUrl}/translate-sub?provider=subdl&sourceUrl=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
+          const aiUrl = `${hostUrl}/translate-sub?provider=subdl&sourceUrl=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
           englishOriginalSubtitles.push({
             id: `subdl-en-${idPart}`,
             url: aiUrl,
@@ -875,7 +883,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             `&config=${encodeURIComponent(encodedConfig || '')}` +
             `&imdbId=${encodeURIComponent(imdbId)}` +
             `&type=${encodeURIComponent(type)}` +
-            `&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
+            `&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
           // Selecting the English subtitle triggers EN -> VI translation.
           englishOriginalSubtitles.push({
             id: `subsource-en-${sub.subtitleId}`,
@@ -915,7 +923,20 @@ async function handleSubtitles(req, res, encodedConfig) {
 
   // IMPORTANT: Vietnamese originals stay untouched. English entries themselves
   // point to /translate-sub, so Gemini is called only after the user selects English.
-  let subtitles = [...nativeVietSubtitles, ...englishOriginalSubtitles];
+  // Stremio can receive duplicate English entries when multiple provider
+  // records point to the same download URL. Keep one AI entry per unique
+  // translate URL so the subtitle picker does not show duplicate Gemini items.
+  const seenSubtitleKeys = new Set();
+  const subtitles = [...nativeVietSubtitles, ...englishOriginalSubtitles].filter(sub => {
+    const nameKey = String(sub?.name || '').trim().toLowerCase();
+    const urlKey = String(sub?.url || '').trim();
+    // Prefer URL identity, but also collapse provider duplicates that expose
+    // the exact same displayed subtitle name in the picker.
+    const key = nameKey ? `name:${nameKey}` : `url:${urlKey}`;
+    if (seenSubtitleKeys.has(key)) return false;
+    seenSubtitleKeys.add(key);
+    return true;
+  });
 
   res.json({ subtitles });
 }
@@ -1240,23 +1261,21 @@ function writeLiveStatus(res, state, force = false) {
 
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
+
+  // TWO-REQUEST FLOW:
+  // Request #1 -> return a temporary status SRT immediately + translate in background.
+  // Request #2 after translation completes -> return the cached final Vietnamese SRT.
+  // Do not stream progress through res.write(); Stremio may cache/buffer the first SRT.
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  // Headers MUST be finalized before the first res.write().
-  // Stremio may buffer the stream, but Node must still receive all headers first.
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  // Do not inject heartbeat bytes into SRT. Some subtitle parsers are
-  // strict and can treat them as malformed subtitle data.
-  const startKeepAlive = () => {};
-  const stopKeepAlive = () => {};
+  if (!url && !provider) {
+    return res.send('1\n00:00:01,000 --> 00:00:05,000\n[LỖI]: Thiếu nguồn phụ đề tiếng Anh.');
+  }
 
-  if (!url && !provider) return res.send('1\n00:00:01,000 --> 00:00:05,000\n[LỖI]: Thiếu nguồn phụ đề tiếng Anh.');
-
-  // Gemini translation is intentionally click-to-translate only:
-  // every AI subtitle exposed by this addon is English source -> Vietnamese.
-  // /subtitles never calls this endpoint, so no Gemini request is made until
-  // Stremio actually opens the AI subtitle URL.
   if (source && String(source).toLowerCase() !== 'en') {
     return res.send('1\n00:00:01,000 --> 00:00:06,000\n[Gemini AI] Chỉ hỗ trợ dịch từ phụ đề tiếng Anh.');
   }
@@ -1265,9 +1284,6 @@ app.get('/translate-sub', async (req, res) => {
   }
 
   let cacheKey = '';
-  let ownsTranslationJob = false;
-  let releaseJob = null;
-  let statusState = null;
 
   try {
     const config = parseConfig(configQuery);
@@ -1304,323 +1320,303 @@ app.get('/translate-sub', async (req, res) => {
     const cachedSrt = getCachedTranslation(cacheKey);
     if (cachedSrt) {
       console.log('[translate-sub CACHE HIT]', cacheKey.slice(0, 180));
-      res.setHeader('Cache-Control', 'public, max-age=21600');
+      // This request has not written anything yet, so it is safe to change the cache header.
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
       return res.send(cachedSrt);
     }
 
-    // If Stremio requests the same subtitle URL twice while the first one is
-    // still translating, let the second request wait for the same job instead
-    // of starting another 3-project Gemini translation.
-    const existingJob = translationInFlight.get(cacheKey);
+      const existingJob = translationInFlight.get(cacheKey);
     if (existingJob) {
-      console.log('[translate-sub REUSE JOB]', cacheKey.slice(0, 180));
-      startKeepAlive();
-      try {
-        const readySrt = await existingJob;
-        stopKeepAlive();
-        res.setHeader('Cache-Control', 'public, max-age=21600');
-        return res.send(readySrt);
-      } catch (err) {
-        stopKeepAlive();
-        return res.send(
-          '1\n00:00:01,000 --> 00:00:10,000\n[Gemini AI] Không thể dịch phụ đề: ' +
-          String(err.message || err).replace(/\\r?\\n/g, ' ')
-        );
-      }
+      console.log('[translate-sub REQUEST #2 WHILE RUNNING]', cacheKey.slice(0, 180));
+      return res.send(
+        makeStatusSrt(
+          1,
+          0,
+          30000,
+          '🟡 Gemini AI đang dịch phụ đề...\n⏱️ Dự kiến khoảng 30 giây.\n🔄 Hãy mở lại phụ đề sau khi dịch hoàn tất.'
+        )
+      );
     }
 
-    const currentJob = new Promise(resolve => {
-      releaseJob = resolve;
+    const jobEntry = {
+      promise: null,
+      resolve: null
+    };
+    jobEntry.promise = new Promise(resolve => {
+      jobEntry.resolve = resolve;
     });
-    translationInFlight.set(cacheKey, currentJob);
-    ownsTranslationJob = true;
-    console.log('[translate-sub NEW JOB]', cacheKey.slice(0, 180));
-    console.log(`🔄 [Gemini AI] Bắt đầu dịch: ${imdbId || 'unknown'} | nguồn=${provider || 'legacy'} | model=${model || config.model || 'gemini-3.5-flash-lite'}`);
-    startKeepAlive();
+    translationInFlight.set(cacheKey, jobEntry);
 
-    statusState = {
+    const statusState = {
       startedAt: Date.now(),
       done: 0,
       total: 1,
       model: selectedModel,
-      etaSeconds: 20,
-      statusNumber: 1,
-      statusCueIndex: 0,
-      lastWrite: 0,
+      etaSeconds: 30,
       finished: false,
       fallback: '',
       error: ''
     };
-    // IMPORTANT: Stremio may buffer a streaming subtitle HTTP response until the
-    // whole response is finished. Therefore live res.write() progress messages
-    // cannot be relied on to appear while Gemini is still translating.
-    //
-    // For Stremio compatibility, the first request now returns ONE immediate
-    // temporary status subtitle and the actual Gemini translation continues in
-    // the background. When Stremio requests the same subtitle URL again, the
-    // completed translation is served from cache (or the shared in-flight job).
-    // This avoids the old long-running HTTP response and prevents
-    // ERR_HTTP_HEADERS_SENT / proxy buffering problems.
-    statusState.etaSeconds = 30;
-    const initialStatusSrt = makeStatusSrt(
-      1,
-      0,
-      30000,
-      `🟡 Gemini AI đang dịch phụ đề... | Model: ${selectedModel} | Dự kiến khoảng 30 giây.
-Vui lòng yêu cầu phụ đề lại sau khi dịch hoàn tất.`
+
+    console.log('[translate-sub REQUEST #1 NEW JOB]', cacheKey.slice(0, 180));
+    console.log(
+      `🔄 [Gemini AI] Request #1: trả trạng thái ngay, bắt đầu dịch nền | ` +
+      `${imdbId || 'unknown'} | nguồn=${provider || 'legacy'} | model=${selectedModel}`
     );
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.send(initialStatusSrt);
-    return void (async () => {
-      // The rest of this handler is executed below in a detached background
-      // task. The original request has already received the status subtitle.
+
+    // Detach the long-running translation from HTTP Request #1.
+    // The background task MUST NOT touch res.
+    void (async () => {
       try {
-
-    let originalSrt;
-    try {
-      // v3.9.7: never call this Render app's own public /proxy-* URL from
-      // /translate-sub. That creates an unnecessary Render edge round-trip
-      // during the long Gemini request and is a common 502 failure point.
-      const sourceConfig = config;
-      if (provider === 'os') {
-        const apiKeyOS = sourceConfig.opensubtitlesKey || '2015';
-        if (!fileId) throw new Error('Thiếu OpenSubtitles file ID.');
-        const download = await axios.post(
-          'https://api.opensubtitles.com/api/v1/download',
-          { file_id: String(fileId) },
-          {
-            headers: {
-              'Api-Key': apiKeyOS,
-              ...API_HEADERS,
-              'Content-Type': 'application/json'
-            },
-            timeout: 10000,
-            validateStatus: status => status >= 200 && status < 300
-          }
-        );
-        const link = download.data?.link || '';
-        if (!link) throw new Error('OpenSubtitles không trả về link tải.');
-        originalSrt = await fetchSubtitleText(link, SUBTITLE_BROWSER_HEADERS, 25000, 1);
-      } else if (provider === 'subdl') {
-        const key = String(sourceConfig.subdlKey || '');
-        if (!key) throw new Error('Thiếu SubDL API Key.');
-        if (!sourceUrl) throw new Error('Thiếu SubDL subtitle URL.');
-        originalSrt = await fetchSubtitleText(sourceUrl, {
-          ...SUBTITLE_BROWSER_HEADERS,
-          'X-API-Key': key,
-          'Authorization': `Bearer ${key}`
-        }, 25000, 1);
-      } else if (provider === 'subsource') {
-        const key = String(sourceConfig.subsourceKey || '');
-        if (!key) throw new Error('Thiếu SubSource API Key.');
-        if (!subtitleId) throw new Error('Thiếu SubSource subtitle ID.');
-        const response = await axios.get(
-          `${SUBSOURCE_API}/subtitles/${encodeURIComponent(subtitleId)}/download`,
-          {
-            headers: getSubsourceHeaders(key),
-            responseType: 'arraybuffer',
-            timeout: 25000,
-            maxRedirects: 5,
-            validateStatus: status => status >= 200 && status < 300
-          }
-        );
-        originalSrt = extractSubtitleText(Buffer.from(response.data));
-      } else {
-        // Backward compatibility for old addon URLs already cached by clients.
-        if (!url) throw new Error('Thiếu đường dẫn file phụ đề.');
-        originalSrt = await fetchSubtitleText(url, SUBTITLE_BROWSER_HEADERS, 25000, 1);
-      }
-    } catch (err) {
-      console.error('[translate-sub source]', err.response?.status || '', err.code || '', err.message);
-      throw new Error('Không tải được file phụ đề tiếng Anh: ' + String(err.message || 'upstream error').slice(0, 140));
-    }
-
-    console.log(`📥 [Gemini AI] Đã tải phụ đề gốc: ${String(originalSrt || '').length.toLocaleString()} ký tự`);
-
-    let movieContext = 'Phim điện ảnh/truyền hình tổng quát. Chưa có metadata từ Cinemeta.';
-    if (imdbId) {
+      let originalSrt;
       try {
-        const metaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/${type === 'series' ? 'series' : 'movie'}/${imdbId}.json`, { timeout: 5000 });
-        const meta = metaRes.data?.meta;
-        if (meta) {
-          const cast = Array.isArray(meta.cast) ? meta.cast.slice(0, 20).join(', ') : '';
-          movieContext =
-            `Tên phim: ${meta.name || ''}` +
-            `\nThể loại: ${Array.isArray(meta.genres) ? meta.genres.join(', ') : ''}` +
-            `\nMô tả: ${meta.description || ''}` +
-            `${cast ? `\nDiễn viên/nhân vật được Cinemeta cung cấp: ${cast}` : ''}`;
-
-          if (type === 'series' && season && episode && Array.isArray(meta.videos)) {
-            const ep = meta.videos.find(v =>
-              v.season === parseInt(season, 10) &&
-              v.episode === parseInt(episode, 10)
-            );
-            if (ep) {
-              movieContext +=
-                `\nTập ${season}x${episode}: ${ep.name || ''}` +
-                `\nTóm tắt tập: ${ep.overview || ''}`;
+        // v3.9.7: never call this Render app's own public /proxy-* URL from
+        // /translate-sub. That creates an unnecessary Render edge round-trip
+        // during the long Gemini request and is a common 502 failure point.
+        const sourceConfig = config;
+        if (provider === 'os') {
+          const apiKeyOS = sourceConfig.opensubtitlesKey || '2015';
+          if (!fileId) throw new Error('Thiếu OpenSubtitles file ID.');
+          const download = await axios.post(
+            'https://api.opensubtitles.com/api/v1/download',
+            { file_id: String(fileId) },
+            {
+              headers: {
+                'Api-Key': apiKeyOS,
+                ...API_HEADERS,
+                'Content-Type': 'application/json'
+              },
+              timeout: 10000,
+              validateStatus: status => status >= 200 && status < 300
             }
-          }
+          );
+          const link = download.data?.link || '';
+          if (!link) throw new Error('OpenSubtitles không trả về link tải.');
+          originalSrt = await fetchSubtitleText(link, SUBTITLE_BROWSER_HEADERS, 25000, 1);
+        } else if (provider === 'subdl') {
+          const key = String(sourceConfig.subdlKey || '');
+          if (!key) throw new Error('Thiếu SubDL API Key.');
+          if (!sourceUrl) throw new Error('Thiếu SubDL subtitle URL.');
+          originalSrt = await fetchSubtitleText(sourceUrl, {
+            ...SUBTITLE_BROWSER_HEADERS,
+            'X-API-Key': key,
+            'Authorization': `Bearer ${key}`
+          }, 25000, 1);
+        } else if (provider === 'subsource') {
+          const key = String(sourceConfig.subsourceKey || '');
+          if (!key) throw new Error('Thiếu SubSource API Key.');
+          if (!subtitleId) throw new Error('Thiếu SubSource subtitle ID.');
+          const response = await axios.get(
+            `${SUBSOURCE_API}/subtitles/${encodeURIComponent(subtitleId)}/download`,
+            {
+              headers: getSubsourceHeaders(key),
+              responseType: 'arraybuffer',
+              timeout: 25000,
+              maxRedirects: 5,
+              validateStatus: status => status >= 200 && status < 300
+            }
+          );
+          originalSrt = extractSubtitleText(Buffer.from(response.data));
+        } else {
+          // Backward compatibility for old addon URLs already cached by clients.
+          if (!url) throw new Error('Thiếu đường dẫn file phụ đề.');
+          originalSrt = await fetchSubtitleText(url, SUBTITLE_BROWSER_HEADERS, 25000, 1);
         }
       } catch (err) {
-        console.error('[Cinemeta context]', err.message);
-      }
-    }
-
-    // v3.9.7: remove the separate relationship-guide Gemini call from the
-    // request path. It added a full extra model request before translation and
-    // made the click-to-translate HTTP request unnecessarily long. Instead,
-    // each translation worker receives a compact dialogue/context sample and
-    // is instructed to infer relationships conservatively from that evidence.
-    const subtitleSample = buildSubtitleContextSample(originalSrt, 4500);
-    const contextGuide = `
-
-[NGỮ CẢNH NHÂN VẬT & XƯNG HÔ]
-Thông tin phim:
-${movieContext}
-
-Mẫu thoại tham chiếu:
-${subtitleSample}
-
-Hãy suy luận tuổi/vai vế/quan hệ và cách xưng hô chỉ khi có bằng chứng; nếu chưa rõ, chọn cách xưng hô trung tính, tự nhiên và nhất quán. Không tự bịa quan hệ.`;
-
-    const chunks = splitSrtIntoChunks(originalSrt, 14000);
-    const translated = [];
-    statusState.total = chunks.length;
-    // Conservative first estimate: three workers, with the existing per-key
-    // request-start limiter plus Gemini processing time. It is refined after
-    // every completed chunk using the real average duration.
-    statusState.etaSeconds = Math.max(10, Math.ceil(Math.ceil(chunks.length / Math.min(3, geminiKeys.length)) * 15));
-    writeLiveStatus(res, statusState, true);
-    console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | 3 worker tối đa | fallback 3.5 → 2.5`);
-
-    // Three workers use the three independent Google projects to reduce wall-clock time
-    // themselves take longer than the 8s per-project request-start interval.
-    // The limiter in callAI() still guarantees that Gemini request starts are
-    // spaced at least 8s apart per project, so each project stays around 7.5 RPM.
-    const translateChunk = async (i, workerKey) => {
-      const startedAt = Date.now();
-      const progressLabel = `${i + 1}/${chunks.length}`;
-      console.log(`⏳ [Gemini AI] Đang dịch chunk ${progressLabel} | worker-key=${workerKeys.indexOf(workerKey) + 1}`);
-
-      const prompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
-
-MỤC TIÊU:
-Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${contextGuide}
-
-NGUYÊN TẮC XƯNG HÔ:
-- Ưu tiên tuyệt đối thông tin nhân vật/quan hệ có bằng chứng trong phần ngữ cảnh ở trên.
-- Giữ nhất quán cách xưng hô giữa các nhân vật xuyên suốt bộ phim.
-- Không thay đổi cách xưng hô chỉ vì một câu thoại đứng riêng lẻ.
-- Khi quan hệ chưa xác định, dùng ngữ cảnh câu thoại để chọn cách xưng hô tự nhiên nhất nhưng KHÔNG bịa quan hệ.
-- Phân biệt đại từ người nói với từ gọi người nghe; không dịch máy móc "you" thành một đại từ cố định.
-- Giữ tên riêng, chức danh, biệt danh và thuật ngữ quan trọng nhất quán.
-- Nếu câu thoại có sắc thái kính trọng, khinh miệt, thân mật, đe dọa, mỉa mai... hãy thể hiện bằng tiếng Việt.
-- Không đưa ghi chú của người dịch vào phụ đề.
-
-ĐỊNH DẠNG:
-- Giữ nguyên tuyệt đối số thứ tự subtitle.
-- Giữ nguyên tuyệt đối timestamps.
-- Giữ nguyên cấu trúc SRT.
-- Chỉ trả về SRT đã dịch, không markdown, không giải thích.
-
-SRT CẦN DỊCH:
-${chunks[i]}`;
-
-      // Start with this worker's dedicated key, then fail over through the
-      // remaining keys if quota/auth/transient errors prevent that key from working.
-      const primaryIndex = workerKeys.indexOf(workerKey);
-      const orderedKeys = primaryIndex >= 0
-        ? workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex))
-        : workerKeys;
-
-      const aiRes = await callAIWithModelFallback(prompt, orderedKeys, selectedModel, 0);
-
-      if (!aiRes.result) {
-        console.error(`[Gemini translation chunk ${i + 1}/${chunks.length}]`, aiRes.error);
-
-        // IMPORTANT: never return untouched English as a Vietnamese subtitle.
-        // Stremio would otherwise show "Tiếng Việt" while the actual text
-        // remains English.
-        throw new Error(
-          `Gemini không dịch được đoạn ${i + 1}/${chunks.length}: ${aiRes.error || 'không có phản hồi'}`
-        );
+        console.error('[translate-sub source]', err.response?.status || '', err.code || '', err.message);
+        throw new Error('Không tải được file phụ đề tiếng Anh: ' + String(err.message || 'upstream error').slice(0, 140));
       }
 
-      translated.push({
-        index: i,
-        text: aiRes.result.trim()
-      });
+      console.log(`📥 [Gemini AI] Đã tải phụ đề gốc: ${String(originalSrt || '').length.toLocaleString()} ký tự`);
 
-      statusState.done = translated.length;
-      statusState.fallback = (aiRes.model && aiRes.model !== selectedModel)
-        ? `Chunk ${i + 1}/${chunks.length} chuyển sang ${aiRes.model}.`
-        : '';
-      writeLiveStatus(res, statusState, true);
+      let movieContext = 'Phim điện ảnh/truyền hình tổng quát. Chưa có metadata từ Cinemeta.';
+      if (imdbId) {
+        try {
+          const metaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/${type === 'series' ? 'series' : 'movie'}/${imdbId}.json`, { timeout: 5000 });
+          const meta = metaRes.data?.meta;
+          if (meta) {
+            const cast = Array.isArray(meta.cast) ? meta.cast.slice(0, 20).join(', ') : '';
+            movieContext =
+              `Tên phim: ${meta.name || ''}` +
+              `\nThể loại: ${Array.isArray(meta.genres) ? meta.genres.join(', ') : ''}` +
+              `\nMô tả: ${meta.description || ''}` +
+              `${cast ? `\nDiễn viên/nhân vật được Cinemeta cung cấp: ${cast}` : ''}`;
 
-      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-      const done = translated.length;
-      const percent = Math.round((done / chunks.length) * 100);
-      console.log(`✅ [Gemini AI] Xong chunk ${progressLabel} | model=${aiRes.model || selectedModel} | ${elapsed}s | tiến độ ${done}/${chunks.length} (${percent}%)`);
-
-      if (aiRes.model && aiRes.model !== selectedModel) {
-        console.warn(`🔁 [Gemini AI] Chunk ${progressLabel} đã fallback từ ${selectedModel} → ${aiRes.model}`);
-      }
-    };
-
-    // One worker per independent Google project/key.
-    // With 3 keys: worker #1 -> chunks 0,3,6...; #2 -> 1,4,7...;
-    // #3 -> 2,5,8... . Each key has its own limiter and queue.
-    const workerKeys = geminiKeys.slice(0, 3);
-    const worker = async (workerIndex, workerKey) => {
-      for (let i = workerIndex; i < chunks.length; i += workerKeys.length) {
-        await translateChunk(i, workerKey);
-      }
-    };
-    await Promise.all(workerKeys.map((key, index) => worker(index, key)));
-
-    console.log(`🎉 [Gemini AI] Dịch hoàn tất ${translated.length}/${chunks.length} chunk. Đang ghép SRT...`);
-
-    // Workers finish out of order; restore the original SRT chunk order.
-    translated.sort((a, b) => a.index - b.index);
-    const finalSrt = cleanAndRebuildSrt(translated.map(t => t.text).join('\n\n'));
-    console.log(`📤 [Gemini AI] Đã ghép SRT và lưu cache | ${finalSrt.length.toLocaleString()} ký tự`);
-    setCachedTranslation(cacheKey, finalSrt);
-    releaseJob(finalSrt);
-    statusState.finished = true;
-    statusState.fallback = '';
-    statusState.etaSeconds = 0;
-    console.log(`🟢 [Gemini AI] Background job hoàn tất | cache ready | ${cacheKey.slice(0, 120)}`);
-    stopKeepAlive();
-    return;
-
-  } catch (err) {
-    console.error('❌ [Gemini AI] Dịch thất bại:', err.stack || err.message || err);
-    console.error('[translate-sub]', err.stack || err.message || err);
-    stopKeepAlive();
-
-    // Resolve the shared job instead of rejecting an unobserved Promise.
-    // This prevents Node from terminating on unhandledRejection.
-    const errorSrt = `1
-00:00:01,000 --> 00:00:10,000
-[Gemini AI] Không thể dịch phụ đề: ${String(err.message || err).replace(/\r?\n/g, ' ')}`;
-    if (typeof releaseJob === 'function') releaseJob(errorSrt);
-    if (statusState) {
-      statusState.error = String(err.message || err).replace(/\r?\n/g, ' ').slice(0, 300);
-      console.error(`🔴 [Gemini AI] Background job lỗi: ${statusState.error}`);
-      return;
-    }
-    return;
-      } finally {
-        if (ownsTranslationJob && cacheKey) {
-          translationInFlight.delete(cacheKey);
-          console.log('[translate-sub JOB RELEASED]', cacheKey.slice(0, 180));
+            if (type === 'series' && season && episode && Array.isArray(meta.videos)) {
+              const ep = meta.videos.find(v =>
+                v.season === parseInt(season, 10) &&
+                v.episode === parseInt(episode, 10)
+              );
+              if (ep) {
+                movieContext +=
+                  `\nTập ${season}x${episode}: ${ep.name || ''}` +
+                  `\nTóm tắt tập: ${ep.overview || ''}`;
+              }
+            }
+          }
+        } catch (err) {
+          console.error('[Cinemeta context]', err.message);
         }
       }
-    })();
+
+      // v3.9.7: remove the separate relationship-guide Gemini call from the
+      // request path. It added a full extra model request before translation and
+      // made the click-to-translate HTTP request unnecessarily long. Instead,
+      // each translation worker receives a compact dialogue/context sample and
+      // is instructed to infer relationships conservatively from that evidence.
+      const subtitleSample = buildSubtitleContextSample(originalSrt, 4500);
+      const contextGuide = `
+
+  [NGỮ CẢNH NHÂN VẬT & XƯNG HÔ]
+  Thông tin phim:
+  ${movieContext}
+
+  Mẫu thoại tham chiếu:
+  ${subtitleSample}
+
+  Hãy suy luận tuổi/vai vế/quan hệ và cách xưng hô chỉ khi có bằng chứng; nếu chưa rõ, chọn cách xưng hô trung tính, tự nhiên và nhất quán. Không tự bịa quan hệ.`;
+
+      const chunks = splitSrtIntoChunks(originalSrt, 14000);
+      const translated = [];
+      statusState.total = chunks.length;
+      // This translation runs in the background after Request #1 has returned.
+      // Never write to res from the background task.
+      statusState.etaSeconds = Math.max(10, Math.ceil(Math.ceil(chunks.length / Math.min(3, geminiKeys.length)) * 15));
+      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | 3 worker tối đa | fallback 3.5 → 2.5 | ETA ~${formatEta(statusState.etaSeconds)}`);
+
+      // Three workers use the three independent Google projects to reduce wall-clock time
+      // themselves take longer than the 8s per-project request-start interval.
+      // The limiter in callAI() still guarantees that Gemini request starts are
+      // spaced at least 8s apart per project, so each project stays around 7.5 RPM.
+      const translateChunk = async (i, workerKey) => {
+        const startedAt = Date.now();
+        const progressLabel = `${i + 1}/${chunks.length}`;
+        console.log(`⏳ [Gemini AI] Đang dịch chunk ${progressLabel} | worker-key=${workerKeys.indexOf(workerKey) + 1}`);
+
+        const prompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
+
+  MỤC TIÊU:
+  Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${contextGuide}
+
+  NGUYÊN TẮC XƯNG HÔ:
+  - Ưu tiên tuyệt đối thông tin nhân vật/quan hệ có bằng chứng trong phần ngữ cảnh ở trên.
+  - Giữ nhất quán cách xưng hô giữa các nhân vật xuyên suốt bộ phim.
+  - Không thay đổi cách xưng hô chỉ vì một câu thoại đứng riêng lẻ.
+  - Khi quan hệ chưa xác định, dùng ngữ cảnh câu thoại để chọn cách xưng hô tự nhiên nhất nhưng KHÔNG bịa quan hệ.
+  - Phân biệt đại từ người nói với từ gọi người nghe; không dịch máy móc "you" thành một đại từ cố định.
+  - Giữ tên riêng, chức danh, biệt danh và thuật ngữ quan trọng nhất quán.
+  - Nếu câu thoại có sắc thái kính trọng, khinh miệt, thân mật, đe dọa, mỉa mai... hãy thể hiện bằng tiếng Việt.
+  - Không đưa ghi chú của người dịch vào phụ đề.
+
+  ĐỊNH DẠNG:
+  - Giữ nguyên tuyệt đối số thứ tự subtitle.
+  - Giữ nguyên tuyệt đối timestamps.
+  - Giữ nguyên cấu trúc SRT.
+  - Chỉ trả về SRT đã dịch, không markdown, không giải thích.
+
+  SRT CẦN DỊCH:
+  ${chunks[i]}`;
+
+        // Start with this worker's dedicated key, then fail over through the
+        // remaining keys if quota/auth/transient errors prevent that key from working.
+        const primaryIndex = workerKeys.indexOf(workerKey);
+        const orderedKeys = primaryIndex >= 0
+          ? workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex))
+          : workerKeys;
+
+        const aiRes = await callAIWithModelFallback(prompt, orderedKeys, selectedModel, 0);
+
+        if (!aiRes.result) {
+          console.error(`[Gemini translation chunk ${i + 1}/${chunks.length}]`, aiRes.error);
+
+          // IMPORTANT: never return untouched English as a Vietnamese subtitle.
+          // Stremio would otherwise show "Tiếng Việt" while the actual text
+          // remains English.
+          throw new Error(
+            `Gemini không dịch được đoạn ${i + 1}/${chunks.length}: ${aiRes.error || 'không có phản hồi'}`
+          );
+        }
+
+        translated.push({
+          index: i,
+          text: aiRes.result.trim()
+        });
+
+        statusState.done = translated.length;
+        statusState.fallback = (aiRes.model && aiRes.model !== selectedModel)
+          ? `Chunk ${i + 1}/${chunks.length} chuyển sang ${aiRes.model}.`
+          : '';
+
+        const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+        const done = translated.length;
+        const percent = Math.round((done / chunks.length) * 100);
+        console.log(`✅ [Gemini AI] Xong chunk ${progressLabel} | model=${aiRes.model || selectedModel} | ${elapsed}s | tiến độ ${done}/${chunks.length} (${percent}%)`);
+
+        if (aiRes.model && aiRes.model !== selectedModel) {
+          console.warn(`🔁 [Gemini AI] Chunk ${progressLabel} đã fallback từ ${selectedModel} → ${aiRes.model}`);
+        }
+      };
+
+      // One worker per independent Google project/key.
+      // With 3 keys: worker #1 -> chunks 0,3,6...; #2 -> 1,4,7...;
+      // #3 -> 2,5,8... . Each key has its own limiter and queue.
+      const workerKeys = geminiKeys.slice(0, 3);
+      const worker = async (workerIndex, workerKey) => {
+        for (let i = workerIndex; i < chunks.length; i += workerKeys.length) {
+          await translateChunk(i, workerKey);
+        }
+      };
+      await Promise.all(workerKeys.map((key, index) => worker(index, key)));
+
+      console.log(`🎉 [Gemini AI] Dịch hoàn tất ${translated.length}/${chunks.length} chunk. Đang ghép SRT...`);
+
+      // Workers finish out of order; restore the original SRT chunk order.
+      translated.sort((a, b) => a.index - b.index);
+      const finalSrt = cleanAndRebuildSrt(translated.map(t => t.text).join('\n\n'));
+      console.log(`📤 [Gemini AI] Đã ghép SRT và lưu cache | ${finalSrt.length.toLocaleString()} ký tự`);
+      setCachedTranslation(cacheKey, finalSrt);
+      if (jobEntry?.resolve) jobEntry.resolve(finalSrt);
+      statusState.finished = true;
+      statusState.fallback = '';
+      statusState.etaSeconds = 0;
+      console.log(`🟢 [Gemini AI] Background job hoàn tất | cache ready | ${cacheKey.slice(0, 120)}`);
+      // Request #1 has already returned the temporary status SRT.
+      // The completed SRT is delivered only when a later request hits the cache.
+      return finalSrt;
+
+      } catch (err) {
+        const errorMessage = String(err.message || err).replace(/\r?\n/g, ' ').slice(0, 300);
+        console.error('❌ [Gemini AI] Dịch thất bại:', err.stack || err.message || err);
+        const errorSrt =
+          `1\n00:00:01,000 --> 00:00:10,000\n[Gemini AI] Không thể dịch phụ đề: ${errorMessage}`;
+        statusState.error = errorMessage;
+        if (jobEntry?.resolve) jobEntry.resolve(errorSrt);
+        console.error('[translate-sub BACKGROUND ERROR]', errorMessage);
+      } finally {
+        const entry = translationInFlight.get(cacheKey);
+        if (entry === jobEntry) {
+          translationInFlight.delete(cacheKey);
+        }
+        console.log('[translate-sub JOB RELEASED]', cacheKey.slice(0, 180));
+      }
+    })().catch(err => {
+      console.error('[translate-sub background detached]', err);
+    });
+
+    // Request #1 ends immediately with a temporary, valid SRT.
+    return res.send(
+      makeStatusSrt(
+        1,
+        0,
+        30000,
+        '🟡 Gemini AI đang dịch phụ đề...\n⏱️ Dự kiến khoảng 30 giây.\n🔄 Hãy mở lại phụ đề sau khi dịch hoàn tất.'
+      )
+    );
   } catch (err) {
-    const errorSrt = `1\n00:00:01,000 --> 00:00:10,000\n[Gemini AI] Không thể khởi động dịch: ${String(err.message || err).replace(/\r?\n/g, ' ')}`;
-    if (!res.headersSent) res.send(errorSrt);
+    console.error('[translate-sub setup]', err.stack || err.message || err);
+    return res.send(
+      `1\n00:00:01,000 --> 00:00:10,000\n[Gemini AI] Không thể bắt đầu dịch: ${String(err.message || err).replace(/\r?\n/g, ' ')}`
+    );
   }
 });
 
