@@ -11,7 +11,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.9.9',
+  'User-Agent': 'AISubtitlePro v3.9.11',
   Accept: 'application/json'
 };
 const SUBTITLE_BROWSER_HEADERS = {
@@ -130,7 +130,7 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.9',
+  version: '3.9.10',
   name: 'Gemini AI Subtitle Pro',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -142,7 +142,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.9', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.10', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -327,35 +327,34 @@ async function withGeminiKeySlot(key, fn) {
 
 async function callAI(prompt, geminiKeys, model) {
   let lastError = 'Lỗi không xác định';
+  const keys = [...new Set((geminiKeys || []).filter(Boolean))];
+  if (!keys.length) return { result: '', error: 'Thiếu Gemini API Key.' };
 
-  // Try the selected model first. If it is unavailable/rate-limited,
-  // fall back to currently supported text models.
-  const modelCandidates = [...new Set([
-    model || 'gemini-3.8-flash',
+  // v3.9.11: selected model is primary. Try ALL available keys on that
+  // model before considering any model fallback. This keeps the 3 Google
+  // Projects useful instead of changing model after the first key fails.
+  const primaryModel = model || 'gemini-3.8-flash';
+  const fallbackModels = [...new Set([
     'gemini-3.8-flash',
     'gemini-3.7-flash',
     'gemini-3.6-flash',
     'gemini-3.5-flash-lite',
     'gemini-2.5-flash'
-  ].filter(Boolean))];
+  ].filter(m => m && m !== primaryModel))];
 
-  for (const key of geminiKeys) {
-    for (const modelName of modelCandidates) {
-      let rateLimited = false;
-
-      for (let attempt = 0; attempt < 3; attempt++) {
+  const tryModelWithAllKeys = async modelName => {
+    let hadUsableFailure = false;
+    for (let keyIndex = 0; keyIndex < keys.length; keyIndex++) {
+      const key = keys[keyIndex];
+      for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const response = await withGeminiKeySlot(key, async () => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`;
             return axios.post(url, {
               contents: [{ parts: [{ text: prompt }] }],
               generationConfig: String(modelName).startsWith('gemini-3.')
-                ? {
-                    thinkingConfig: { thinkingLevel: 'low' }
-                  }
-                : {
-                    temperature: 0.2
-                  }
+                ? { thinkingConfig: { thinkingLevel: 'low' } }
+                : { temperature: 0.2 }
             }, {
               timeout: 60000,
               headers: { 'Content-Type': 'application/json' }
@@ -363,58 +362,60 @@ async function callAI(prompt, geminiKeys, model) {
           });
 
           const result = response.data?.candidates?.[0]?.content?.parts
-            ?.map(p => p.text || '')
-            .join('')
-            .trim();
-
-          if (result) {
-            return { result, error: null, model: modelName };
-          }
-
-          lastError = `Gemini ${modelName}: không trả về nội dung`;
+            ?.map(p => p.text || '').join('').trim();
+          if (result) return { result, error: null, model: modelName, keyIndex: keyIndex + 1 };
+          lastError = `Gemini ${modelName} / key #${keyIndex + 1}: không trả về nội dung`;
           break;
         } catch (err) {
           const status = err.response?.status;
-          const message =
-            err.response?.data?.error?.message ||
-            err.message ||
-            `Gemini ${modelName}: lỗi không xác định`;
-
+          const message = err.response?.data?.error?.message || err.message || `Gemini ${modelName}: lỗi không xác định`;
           lastError = message;
-          console.error(`[Gemini ${modelName}]`, message);
+          console.error(`[Gemini ${modelName} / key #${keyIndex + 1}]`, message);
 
-          if (status === 401 || status === 403 ||
-              /invalid authentication credentials|api key not valid|invalid api key|authentication|unauthorized|permission denied/i.test(message)) {
-            console.warn(`[Gemini ${modelName}] Authentication failure; trying next key/model.`);
+          if (status === 401 || status === 403 || /invalid authentication credentials|api key not valid|invalid api key|authentication|unauthorized|permission denied/i.test(message)) {
+            console.warn(`[Gemini ${modelName}] key #${keyIndex + 1} authentication failure; trying next key.`);
             break;
           }
 
           if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(message)) {
-            rateLimited = true;
-            // Do not sleep 15-60s inside a Stremio subtitle request.
-            // With 3 independent projects, another worker/key can continue.
-            console.warn(`[Gemini ${modelName}] Rate limit/quota: fail fast for this key.`);
+            console.warn(`[Gemini ${modelName}] key #${keyIndex + 1} rate/quota limit; trying next key.`);
             break;
           }
 
+          if (status === 408 || status === 500 || status === 502 || status === 503 || /timeout|timed out|high demand|temporarily unavailable|unavailable/i.test(message)) {
+            if (attempt === 0) {
+              console.warn(`[Gemini ${modelName}] key #${keyIndex + 1} transient failure; retrying once.`);
+              continue;
+            }
+            console.warn(`[Gemini ${modelName}] key #${keyIndex + 1} transient failure; trying next key.`);
+            break;
+          }
+
+          hadUsableFailure = true;
           break;
         }
       }
-
-      // A 429 is quota-level; immediately switching models/keys can create
-      // another burst because Gemini quotas are generally enforced per project.
-      if (rateLimited) {
-        return { result: '', error: `Gemini rate limit (429): ${lastError}` };
-      }
     }
+    return { result: '', error: lastError, hadUsableFailure };
+  };
+
+  // IMPORTANT: all keys on the selected model first.
+  const primary = await tryModelWithAllKeys(primaryModel);
+  if (primary.result) return primary;
+
+  // Last-resort model fallback only after every configured key failed on the
+  // selected model. This prevents the old key -> model -> key pattern.
+  for (const fallbackModel of fallbackModels) {
+    const fallback = await tryModelWithAllKeys(fallbackModel);
+    if (fallback.result) return fallback;
   }
 
   return { result: '', error: lastError };
 }
 
-
-// Pin an AI call to exactly one API key/project. v3.5 uses this for the
-// 3 translation workers so each worker stays on its assigned project.
+// Kept for health checks and compatibility. A pinned worker intentionally uses
+// one key only; the translation path below passes all configured keys so it can
+// fail over across projects on the same selected model.
 async function callAIWithKey(prompt, key, model) {
   if (!key) return { result: '', error: 'Thiếu Gemini API Key.' };
   return callAI(prompt, [key], model);
@@ -554,7 +555,6 @@ async function handleSubtitles(req, res, encodedConfig) {
     const ai = [];
     try {
       const apiKeyOS = String(config.opensubtitlesKey || '2015').trim();
-  console.log('[VI ORIGINAL OpenSubtitles]', JSON.stringify({ fileId: fileId || '', hasKey: !!config.opensubtitlesKey }));
       const baseParams = {};
       if (imdbId.startsWith('tt')) baseParams.imdb_id = imdbId.replace(/^tt/, '');
       if (type === 'series' && season !== null && episode !== null) {
@@ -1285,7 +1285,7 @@ NGUYÊN TẮC XƯNG HÔ:
 SRT CẦN DỊCH:
 ${chunks[i]}`;
 
-      const aiRes = await callAIWithKey(prompt, workerKey, selectedModel);
+      const aiRes = await callAI(prompt, geminiKeys.slice(0, 3), selectedModel);
 
       if (!aiRes.result) {
         console.error(`[Gemini translation chunk ${i + 1}/${chunks.length}]`, aiRes.error);
@@ -1304,9 +1304,9 @@ ${chunks[i]}`;
       });
     };
 
-    // One worker per independent Google project/key.
-    // With 3 keys: worker #1 -> chunks 0,3,6...; #2 -> 1,4,7...;
-    // #3 -> 2,5,8... . Each key has its own limiter and queue.
+    // Three parallel workers. Each chunk tries all configured keys on the
+    // selected model first; keys/projects provide failover instead of model
+    // hopping after the first key failure.
     const workerKeys = geminiKeys.slice(0, 3);
     const worker = async (workerIndex, workerKey) => {
       for (let i = workerIndex; i < chunks.length; i += workerKeys.length) {
