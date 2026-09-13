@@ -78,7 +78,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.9.15</h2>
+<h2>Gemini AI Subtitle Pro v3.9.19</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -127,7 +127,7 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.14',
+  version: '3.9.19',
   name: 'Gemini AI Subtitle Pro',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -139,7 +139,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.10', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.19', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -592,13 +592,16 @@ async function handleSubtitles(req, res, encodedConfig) {
   const hostUrl = makeHostUrl(req);
   const modelToUse = config.model || 'gemini-3.5-flash-lite';
 
-  // Cache-buster for Stremio's subtitle URL cache. Older versions of this
-  // addon returned a temporary "đang dịch..." SRT from the same URL. Stremio
-  // can keep that old response locally even after the server has the translated
-  // SRT. A fresh version token makes every newly generated AI subtitle URL a
-  // different client-side resource, while the server-side translation cache
-  // deliberately ignores this token and still reuses the completed translation.
-  const aiUrlVersion = Date.now().toString(36);
+  // SAME-TRACK MODE:
+  // Keep one stable Gemini subtitle URL for the lifetime of this subtitle track.
+  // Request #1 returns the temporary "đang dịch..." SRT and starts the background job.
+  // After Gemini finishes, a later request to THIS SAME URL returns the cached
+  // Vietnamese SRT. Do not use Date.now() here: regenerating the URL on every
+  // /subtitles request creates a new client-side resource identity.
+  //
+  // Bump this constant only when intentionally invalidating old client-side
+  // subtitle URLs after a future protocol/response change.
+  const aiUrlVersion = '2';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -1262,9 +1265,11 @@ function writeLiveStatus(res, state, force = false) {
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
 
-  // TWO-REQUEST FLOW:
-  // Request #1 -> return a temporary status SRT immediately + translate in background.
-  // Request #2 after translation completes -> return the cached final Vietnamese SRT.
+  // SAME-TRACK / TWO-REQUEST FLOW:
+  // Request #1 on the selected Gemini track -> return a temporary status SRT
+  // immediately and start translation in the background.
+  // A later request to the SAME track URL -> return the cached final Vietnamese SRT.
+  // No second Gemini track is created and no subtitle `lang` declaration is changed.
   // Do not stream progress through res.write(); Stremio may cache/buffer the first SRT.
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
@@ -1607,6 +1612,7 @@ app.get('/translate-sub', async (req, res) => {
         throw new Error('Không xác minh được FINAL SRT trong translation cache.');
       }
       console.log(`[translate-sub FINAL CACHE READY] ${cacheKey.slice(0, 180)} | ${verifiedFinalSrt.length.toLocaleString()} ký tự`);
+      console.log(`🟢 [Gemini AI] SAME TRACK READY: lần request tiếp theo của chính URL Gemini này sẽ trả SRT Việt.`);
 
       if (jobEntry?.resolve) jobEntry.resolve(verifiedFinalSrt);
       statusState.finished = true;
