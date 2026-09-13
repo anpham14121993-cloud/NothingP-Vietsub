@@ -11,7 +11,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.9.8',
+  'User-Agent': 'AISubtitlePro v3.9.9',
   Accept: 'application/json'
 };
 const SUBTITLE_BROWSER_HEADERS = {
@@ -69,7 +69,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.9.8</h2>
+<h2>Gemini AI Subtitle Pro v3.9.9</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -374,15 +374,6 @@ async function callAI(prompt, geminiKeys, model) {
           lastError = message;
           console.error(`[Gemini ${modelName}]`, message);
 
-          const authError =
-            status === 401 || status === 403 ||
-            /invalid authentication credentials|api key not valid|invalid api key|authentication|unauthorized/i.test(message);
-          if (authError) {
-            console.warn(`[Gemini ${modelName}] Authentication failure; trying next key/model.`);
-            lastError = message;
-            break;
-          }
-
           if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(message)) {
             rateLimited = true;
             // Do not sleep 15-60s inside a Stremio subtitle request.
@@ -547,7 +538,8 @@ async function handleSubtitles(req, res, encodedConfig) {
     const native = [];
     const ai = [];
     try {
-      const apiKeyOS = config.opensubtitlesKey || '2015';
+      const apiKeyOS = String(config.opensubtitlesKey || '2015').trim();
+  console.log('[VI ORIGINAL OpenSubtitles]', JSON.stringify({ fileId: fileId || '', hasKey: !!config.opensubtitlesKey }));
       const baseParams = {};
       if (imdbId.startsWith('tt')) baseParams.imdb_id = imdbId.replace(/^tt/, '');
       if (type === 'series' && season !== null && episode !== null) {
@@ -864,7 +856,8 @@ async function handleSubtitles(req, res, encodedConfig) {
 app.get('/subsource-sub/:subtitleId', async (req, res) => {
   const { subtitleId } = req.params;
   const config = parseConfig(req.query.config || '');
-  const apiKey = String(config.subsourceKey || '');
+  const apiKey = String(config.subsourceKey || '').trim();
+  console.log('[VI ORIGINAL SubSource]', JSON.stringify({ subtitleId: subtitleId || '', hasKey: !!apiKey }));
 
   if (!subtitleId) return res.status(400).send('Missing subtitle ID');
   if (!apiKey) return res.status(401).send('Missing SubSource API Key');
@@ -886,7 +879,8 @@ app.get('/proxy-os', async (req, res) => {
   const fileId = String(req.query.fileId || '');
   const directLink = String(req.query.link || '');
   const config = parseConfig(req.query.config || '');
-  const apiKeyOS = config.opensubtitlesKey || '2015';
+  const apiKeyOS = String(config.opensubtitlesKey || '2015').trim();
+  console.log('[VI ORIGINAL OpenSubtitles]', JSON.stringify({ fileId: fileId || '', hasKey: !!config.opensubtitlesKey }));
 
   if (!fileId && !directLink) {
     return res.status(400).send('Missing OpenSubtitles file ID');
@@ -930,16 +924,15 @@ app.get('/proxy-os', async (req, res) => {
       'upstream error';
 
     console.error('[OpenSubtitles download]', status, err.code || '', detail);
-    return res.status(502).send(
-      'Không thể tải phụ đề OpenSubtitles: ' + String(detail).slice(0, 180)
-    );
+    return res.send('1\n00:00:01,000 --> 00:00:10,000\n[OpenSubtitles] Không thể tải phụ đề gốc: ' + String(detail).replace(/\r?\n/g, ' ').slice(0, 180));
   }
 });
 
 app.get('/proxy-subdl', async (req, res) => {
   const url = String(req.query.url || '');
   const config = parseConfig(req.query.config || '');
-  const key = String(config.subdlKey || '');
+  const key = String(config.subdlKey || '').trim();
+  console.log('[VI ORIGINAL SubDL]', JSON.stringify({ hasUrl: !!url, hasKey: !!key }));
 
   if (!url) return res.status(400).send('Missing SubDL URL');
   if (!key) return res.status(401).send('Missing SubDL API Key');
@@ -955,9 +948,7 @@ app.get('/proxy-subdl', async (req, res) => {
     return res.send(subtitleText);
   } catch (err) {
     console.error('[SubDL download]', err.response?.status || '', err.code || '', err.message);
-    return res.status(502).send(
-      'Không thể tải phụ đề SubDL: ' + String(err.message || 'upstream error').slice(0, 180)
-    );
+    return res.send('1\n00:00:01,000 --> 00:00:10,000\n[SubDL] Không thể tải phụ đề gốc: ' + String(err.message || 'upstream error').replace(/\r?\n/g, ' ').slice(0, 180));
   }
 });
 
@@ -971,7 +962,7 @@ app.get('/proxy-sub', async (req, res) => {
     res.send(text);
   } catch (err) {
     console.error('[proxy-sub]', err.response?.status || '', err.code || '', err.message);
-    res.status(502).send('Không thể tải phụ đề gốc: ' + String(err.message || 'upstream error').slice(0, 180));
+    res.send('1\n00:00:01,000 --> 00:00:10,000\n[Proxy] Không thể tải phụ đề gốc: ' + String(err.message || 'upstream error').replace(/\r?\n/g, ' ').slice(0, 180));
   }
 });
 
@@ -1091,7 +1082,6 @@ app.get('/translate-sub', async (req, res) => {
   let cacheKey = '';
   let ownsTranslationJob = false;
   let releaseJob = null;
-  let rejectJob = null;
 
   try {
     const config = parseConfig(configQuery);
@@ -1134,9 +1124,8 @@ app.get('/translate-sub', async (req, res) => {
       }
     }
 
-    const currentJob = new Promise((resolve, reject) => {
+    const currentJob = new Promise(resolve => {
       releaseJob = resolve;
-      rejectJob = reject;
     });
     translationInFlight.set(cacheKey, currentJob);
     ownsTranslationJob = true;
@@ -1320,16 +1309,16 @@ ${chunks[i]}`;
     return res.send(finalSrt);
 
   } catch (err) {
-    if (typeof rejectJob === 'function') rejectJob(err);
-
     console.error('[translate-sub]', err.stack || err.message || err);
     stopKeepAlive();
 
-    return res.send(
-      '1\n00:00:01,000 --> 00:00:10,000\n' +
-      '[Gemini AI] Không thể dịch phụ đề: ' +
-      String(err.message || err).replace(/\\r?\\n/g, ' ')
-    );
+    // Resolve the shared job instead of rejecting an unobserved Promise.
+    // This prevents Node from terminating on unhandledRejection.
+    const errorSrt = `1
+00:00:01,000 --> 00:00:10,000
+[Gemini AI] Không thể dịch phụ đề: ${String(err.message || err).replace(/\r?\n/g, ' ')}`;
+    if (typeof releaseJob === 'function') releaseJob(errorSrt);
+    return res.send(errorSrt);
   } finally {
     if (ownsTranslationJob && cacheKey) {
       translationInFlight.delete(cacheKey);
@@ -1352,3 +1341,4 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
+
