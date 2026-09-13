@@ -1232,12 +1232,17 @@ function writeLiveStatus(res, state, force = false) {
   // This is deliberately valid SRT. Stremio may buffer the HTTP response,
   // so live updates are client-dependent; when streaming is supported they
   // appear as temporary subtitle/status cues instead of a native toast.
-  res.write(makeStatusSrt(state.statusNumber++, 0, Math.max(1500, Math.round(eta * 1000) + 1500), text));
+  const cueStart = Math.max(0, (state.statusCueIndex || 0) * 2500);
+  const cueEnd = cueStart + 2200;
+  state.statusCueIndex = (state.statusCueIndex || 0) + 1;
+  res.write(makeStatusSrt(state.statusNumber++, cueStart, cueEnd, text));
 }
 
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  // Headers MUST be finalized before the first res.write().
+  // Stremio may buffer the stream, but Node must still receive all headers first.
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('X-Accel-Buffering', 'no');
 
@@ -1340,13 +1345,36 @@ app.get('/translate-sub', async (req, res) => {
       model: selectedModel,
       etaSeconds: 20,
       statusNumber: 1,
+      statusCueIndex: 0,
       lastWrite: 0,
       finished: false,
       fallback: '',
       error: ''
     };
-    if (typeof res.flushHeaders === 'function') res.flushHeaders();
-    writeLiveStatus(res, statusState, true);
+    // IMPORTANT: Stremio may buffer a streaming subtitle HTTP response until the
+    // whole response is finished. Therefore live res.write() progress messages
+    // cannot be relied on to appear while Gemini is still translating.
+    //
+    // For Stremio compatibility, the first request now returns ONE immediate
+    // temporary status subtitle and the actual Gemini translation continues in
+    // the background. When Stremio requests the same subtitle URL again, the
+    // completed translation is served from cache (or the shared in-flight job).
+    // This avoids the old long-running HTTP response and prevents
+    // ERR_HTTP_HEADERS_SENT / proxy buffering problems.
+    statusState.etaSeconds = 30;
+    const initialStatusSrt = makeStatusSrt(
+      1,
+      0,
+      30000,
+      `🟡 Gemini AI đang dịch phụ đề... | Model: ${selectedModel} | Dự kiến khoảng 30 giây.
+Vui lòng yêu cầu phụ đề lại sau khi dịch hoàn tất.`
+    );
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.send(initialStatusSrt);
+    return void (async () => {
+      // The rest of this handler is executed below in a detached background
+      // task. The original request has already received the status subtitle.
+      try {
 
     let originalSrt;
     try {
@@ -1562,14 +1590,9 @@ ${chunks[i]}`;
     statusState.finished = true;
     statusState.fallback = '';
     statusState.etaSeconds = 0;
-    writeLiveStatus(res, statusState, true);
-    // The status cues are streamed first. Renumber the real subtitle blocks so
-    // the combined response remains valid SRT instead of having duplicate IDs.
-    const streamedFinalSrt = shiftAndAppendSrt(statusState.statusNumber, finalSrt);
+    console.log(`🟢 [Gemini AI] Background job hoàn tất | cache ready | ${cacheKey.slice(0, 120)}`);
     stopKeepAlive();
-    res.setHeader('Cache-Control', 'public, max-age=21600');
-    res.write(streamedFinalSrt);
-    return res.end();
+    return;
 
   } catch (err) {
     console.error('❌ [Gemini AI] Dịch thất bại:', err.stack || err.message || err);
@@ -1584,16 +1607,20 @@ ${chunks[i]}`;
     if (typeof releaseJob === 'function') releaseJob(errorSrt);
     if (statusState) {
       statusState.error = String(err.message || err).replace(/\r?\n/g, ' ').slice(0, 300);
-      writeLiveStatus(res, statusState, true);
-      res.write(shiftAndAppendSrt(statusState.statusNumber, errorSrt));
-      return res.end();
+      console.error(`🔴 [Gemini AI] Background job lỗi: ${statusState.error}`);
+      return;
     }
-    return res.send(errorSrt);
-  } finally {
-    if (ownsTranslationJob && cacheKey) {
-      translationInFlight.delete(cacheKey);
-      console.log('[translate-sub JOB RELEASED]', cacheKey.slice(0, 180));
-    }
+    return;
+      } finally {
+        if (ownsTranslationJob && cacheKey) {
+          translationInFlight.delete(cacheKey);
+          console.log('[translate-sub JOB RELEASED]', cacheKey.slice(0, 180));
+        }
+      }
+    })();
+  } catch (err) {
+    const errorSrt = `1\n00:00:01,000 --> 00:00:10,000\n[Gemini AI] Không thể khởi động dịch: ${String(err.message || err).replace(/\r?\n/g, ' ')}`;
+    if (!res.headersSent) res.send(errorSrt);
   }
 });
 
