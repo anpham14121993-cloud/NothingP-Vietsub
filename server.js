@@ -11,7 +11,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.9.6',
+  'User-Agent': 'AISubtitlePro v3.9.7',
   Accept: 'application/json'
 };
 const SUBTITLE_BROWSER_HEADERS = {
@@ -69,7 +69,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.9.6</h2>
+<h2>Gemini AI Subtitle Pro v3.9.7</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -348,7 +348,7 @@ async function callAI(prompt, geminiKeys, model) {
                     temperature: 0.2
                   }
             }, {
-              timeout: 90000,
+              timeout: 60000,
               headers: { 'Content-Type': 'application/json' }
             });
           });
@@ -591,7 +591,7 @@ async function handleSubtitles(req, res, encodedConfig) {
 
         // IMPORTANT: The English track itself is the trigger for Gemini.
         // Stremio only requests this URL after the user selects the English subtitle.
-        const aiUrl = `${hostUrl}/translate-sub?url=${encodeURIComponent(sourceUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
+        const aiUrl = `${hostUrl}/translate-sub?provider=os&fileId=${encodeURIComponent(file.file_id)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
         return {
           id: `os-en-${item.id}`,
           url: aiUrl,
@@ -694,7 +694,7 @@ async function handleSubtitles(req, res, encodedConfig) {
           });
         } else if (!vi && isEnglish(lang)) {
           // Selecting the English subtitle triggers EN -> VI translation.
-          const aiUrl = `${hostUrl}/translate-sub?url=${encodeURIComponent(sourceUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
+          const aiUrl = `${hostUrl}/translate-sub?provider=subdl&sourceUrl=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi`;
           englishOriginalSubtitles.push({
             id: `subdl-en-${idPart}`,
             url: aiUrl,
@@ -801,7 +801,8 @@ async function handleSubtitles(req, res, encodedConfig) {
           });
         } else if (!isViSelected && isEnglish(subLanguage)) {
           const aiUrl =
-            `${hostUrl}/translate-sub?url=${encodeURIComponent(downloadUrl)}` +
+            `${hostUrl}/translate-sub?provider=subsource` +
+            `&subtitleId=${encodeURIComponent(sub.subtitleId)}` +
             `&model=${encodeURIComponent(modelToUse)}` +
             `&config=${encodeURIComponent(encodedConfig || '')}` +
             `&imdbId=${encodeURIComponent(imdbId)}` +
@@ -1057,7 +1058,7 @@ function setCachedTranslation(key, srt) {
 }
 
 app.get('/translate-sub', async (req, res) => {
-  const { url, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
+  const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
 
   // Do not inject heartbeat bytes into SRT. Some subtitle parsers are
@@ -1065,7 +1066,7 @@ app.get('/translate-sub', async (req, res) => {
   const startKeepAlive = () => {};
   const stopKeepAlive = () => {};
 
-  if (!url) return res.send('1\n00:00:01,000 --> 00:00:05,000\n[LỖI]: Thiếu đường dẫn file phụ đề.');
+  if (!url && !provider) return res.send('1\n00:00:01,000 --> 00:00:05,000\n[LỖI]: Thiếu nguồn phụ đề tiếng Anh.');
 
   // Gemini translation is intentionally click-to-translate only:
   // every AI subtitle exposed by this addon is English source -> Vietnamese.
@@ -1083,6 +1084,7 @@ app.get('/translate-sub', async (req, res) => {
 
   try {
     const config = parseConfig(configQuery);
+    console.log('[translate-sub start]', JSON.stringify({ provider: provider || 'legacy', model: model || config.model || 'gemini-3.8-flash', imdbId: imdbId || '', type: type || '', season: season || '', episode: episode || '' }));
     const geminiKeys = (config.geminiKeys && config.geminiKeys.length > 0)
       ? config.geminiKeys
       : [process.env.GEMINI_API_KEY].filter(Boolean);
@@ -1092,7 +1094,8 @@ app.get('/translate-sub', async (req, res) => {
     }
 
     const selectedModel = model || config.model || 'gemini-3.8-flash';
-    cacheKey = makeTranslationCacheKey({ url, model: selectedModel, imdbId, type, season, episode });
+    const sourceCacheId = url || `${provider || ''}|${fileId || ''}|${sourceUrl || ''}|${subtitleId || ''}`;
+    cacheKey = makeTranslationCacheKey({ url: sourceCacheId, model: selectedModel, imdbId, type, season, episode });
 
     const cachedSrt = getCachedTranslation(cacheKey);
     if (cachedSrt) {
@@ -1132,16 +1135,61 @@ app.get('/translate-sub', async (req, res) => {
 
     let originalSrt;
     try {
-      // Provider proxy routes resolve their own API credentials. Translation
-      // only needs to fetch the generated subtitle URL.
-      originalSrt = await fetchSubtitleText(
-        url,
-        SUBTITLE_BROWSER_HEADERS,
-        30000,
-        2
-      );
+      // v3.9.7: never call this Render app's own public /proxy-* URL from
+      // /translate-sub. That creates an unnecessary Render edge round-trip
+      // during the long Gemini request and is a common 502 failure point.
+      const sourceConfig = config;
+      if (provider === 'os') {
+        const apiKeyOS = sourceConfig.opensubtitlesKey || '2015';
+        if (!fileId) throw new Error('Thiếu OpenSubtitles file ID.');
+        const download = await axios.post(
+          'https://api.opensubtitles.com/api/v1/download',
+          { file_id: String(fileId) },
+          {
+            headers: {
+              'Api-Key': apiKeyOS,
+              ...API_HEADERS,
+              'Content-Type': 'application/json'
+            },
+            timeout: 10000,
+            validateStatus: status => status >= 200 && status < 300
+          }
+        );
+        const link = download.data?.link || '';
+        if (!link) throw new Error('OpenSubtitles không trả về link tải.');
+        originalSrt = await fetchSubtitleText(link, SUBTITLE_BROWSER_HEADERS, 25000, 1);
+      } else if (provider === 'subdl') {
+        const key = String(sourceConfig.subdlKey || '');
+        if (!key) throw new Error('Thiếu SubDL API Key.');
+        if (!sourceUrl) throw new Error('Thiếu SubDL subtitle URL.');
+        originalSrt = await fetchSubtitleText(sourceUrl, {
+          ...SUBTITLE_BROWSER_HEADERS,
+          'X-API-Key': key,
+          'Authorization': `Bearer ${key}`
+        }, 25000, 1);
+      } else if (provider === 'subsource') {
+        const key = String(sourceConfig.subsourceKey || '');
+        if (!key) throw new Error('Thiếu SubSource API Key.');
+        if (!subtitleId) throw new Error('Thiếu SubSource subtitle ID.');
+        const response = await axios.get(
+          `${SUBSOURCE_API}/subtitles/${encodeURIComponent(subtitleId)}/download`,
+          {
+            headers: getSubsourceHeaders(key),
+            responseType: 'arraybuffer',
+            timeout: 25000,
+            maxRedirects: 5,
+            validateStatus: status => status >= 200 && status < 300
+          }
+        );
+        originalSrt = extractSubtitleText(Buffer.from(response.data));
+      } else {
+        // Backward compatibility for old addon URLs already cached by clients.
+        if (!url) throw new Error('Thiếu đường dẫn file phụ đề.');
+        originalSrt = await fetchSubtitleText(url, SUBTITLE_BROWSER_HEADERS, 25000, 1);
+      }
     } catch (err) {
-      throw new Error('Không tải được file phụ đề tiếng Anh.');
+      console.error('[translate-sub source]', err.response?.status || '', err.code || '', err.message);
+      throw new Error('Không tải được file phụ đề tiếng Anh: ' + String(err.message || 'upstream error').slice(0, 140));
     }
 
     let movieContext = 'Phim điện ảnh/truyền hình tổng quát. Chưa có metadata từ Cinemeta.';
@@ -1174,36 +1222,22 @@ app.get('/translate-sub', async (req, res) => {
       }
     }
 
-    // Build the relationship/pronoun bible ONCE before translating the SRT.
-    // The sample gives Gemini actual dialogue context, not only generic
-    // movie metadata, so it can make better decisions about hierarchy,
-    // age, intimacy and forms of address.
-    const subtitleSample = buildSubtitleContextSample(originalSrt, 10000);
-    let relationshipGuide = '';
+    // v3.9.7: remove the separate relationship-guide Gemini call from the
+    // request path. It added a full extra model request before translation and
+    // made the click-to-translate HTTP request unnecessarily long. Instead,
+    // each translation worker receives a compact dialogue/context sample and
+    // is instructed to infer relationships conservatively from that evidence.
+    const subtitleSample = buildSubtitleContextSample(originalSrt, 4500);
+    const contextGuide = `
 
-    try {
-      relationshipGuide = await buildCharacterRelationshipGuide({
-        movieContext,
-        subtitleSample,
-        // One-time guide call on project/key #1.
-        geminiKeys: [geminiKeys[0]],
-        model: selectedModel
-      });
-    } catch (err) {
-      console.error('[AI relationship guide]', err.message);
-    }
+[NGỮ CẢNH NHÂN VẬT & XƯNG HÔ]
+Thông tin phim:
+${movieContext}
 
-    const pronounGuide = relationshipGuide
-      ? `
+Mẫu thoại tham chiếu:
+${subtitleSample}
 
-[SỔ TAY NHÂN VẬT & QUAN HỆ — phải dùng nhất quán trong toàn bộ bản dịch]
-${relationshipGuide}
-`
-      : `
-
-[QUY TẮC XƯNG HÔ]
-Không có sổ tay quan hệ đáng tin cậy. Hãy suy luận thận trọng từ chính đoạn thoại và bối cảnh, không tự bịa quan hệ.
-`;
+Hãy suy luận tuổi/vai vế/quan hệ và cách xưng hô chỉ khi có bằng chứng; nếu chưa rõ, chọn cách xưng hô trung tính, tự nhiên và nhất quán. Không tự bịa quan hệ.`;
 
     const chunks = splitSrtIntoChunks(originalSrt, 12000);
     const translated = [];
@@ -1216,13 +1250,13 @@ Không có sổ tay quan hệ đáng tin cậy. Hãy suy luận thận trọng t
       const prompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
 MỤC TIÊU:
-Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${pronounGuide}
+Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${contextGuide}
 
 NGUYÊN TẮC XƯNG HÔ:
-- Ưu tiên tuyệt đối sổ tay nhân vật/quan hệ ở trên.
+- Ưu tiên tuyệt đối thông tin nhân vật/quan hệ có bằng chứng trong phần ngữ cảnh ở trên.
 - Giữ nhất quán cách xưng hô giữa các nhân vật xuyên suốt bộ phim.
 - Không thay đổi cách xưng hô chỉ vì một câu thoại đứng riêng lẻ.
-- Khi sổ tay chưa xác định quan hệ, dùng ngữ cảnh câu thoại để chọn cách xưng hô tự nhiên nhất nhưng KHÔNG bịa quan hệ.
+- Khi quan hệ chưa xác định, dùng ngữ cảnh câu thoại để chọn cách xưng hô tự nhiên nhất nhưng KHÔNG bịa quan hệ.
 - Phân biệt đại từ người nói với từ gọi người nghe; không dịch máy móc "you" thành một đại từ cố định.
 - Giữ tên riêng, chức danh, biệt danh và thuật ngữ quan trọng nhất quán.
 - Nếu câu thoại có sắc thái kính trọng, khinh miệt, thân mật, đe dọa, mỉa mai... hãy thể hiện bằng tiếng Việt.
