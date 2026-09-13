@@ -11,7 +11,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const SUBSOURCE_API = 'https://api.subsource.net/api/v1';
 const API_HEADERS = {
-  'User-Agent': 'AISubtitlePro v3.9.11',
+  'User-Agent': 'AISubtitlePro v3.9.13',
   Accept: 'application/json'
 };
 const SUBTITLE_BROWSER_HEADERS = {
@@ -78,16 +78,14 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>Gemini AI Subtitle Pro v3.9.9</h2>
+<h2>Gemini AI Subtitle Pro v3.9.13</h2>
 <form id="configForm">
-<label>Mô hình AI dịch ưu tiên:</label>
+<label>Mô hình AI dịch:</label>
 <select id="modelSelect">
-<option value="gemini-3.8-flash" ${savedConfig.model === 'gemini-3.8-flash' || !savedConfig.model ? 'selected' : ''}>Gemini 3.8 Flash - Low thinking (Khuyên dùng)</option>
-<option value="gemini-3.7-flash" ${savedConfig.model === 'gemini-3.7-flash' ? 'selected' : ''}>Gemini 3.7 Flash - Low thinking</option>
-<option value="gemini-3.6-flash" ${savedConfig.model === 'gemini-3.6-flash' ? 'selected' : ''}>Gemini 3.6 Flash - Low thinking</option>
-<option value="gemini-3.5-flash-lite" ${savedConfig.model === 'gemini-3.5-flash-lite' ? 'selected' : ''}>Gemini 3.5 Flash-Lite</option>
-<option value="gemini-2.5-flash" ${savedConfig.model === 'gemini-2.5-flash' ? 'selected' : ''}>Gemini 2.5 Flash (Dự phòng)</option>
+<option value="gemini-3.5-flash-lite" ${savedConfig.model === 'gemini-3.5-flash-lite' || !savedConfig.model ? 'selected' : ''}>Gemini 3.5 Flash-Lite (Chính)</option>
+<option value="gemini-2.5-flash" ${savedConfig.model === 'gemini-2.5-flash' ? 'selected' : ''}>Gemini 2.5 Flash (Dự phòng / có thể chọn làm chính)</option>
 </select>
+<div style="font-size:12px;color:#aaa;margin-top:8px;line-height:1.45">Cơ chế dịch: xoay Key 1 → Key 2 → Key 3 trên model chính. Nếu cả 3 Key đều lỗi/quota, tự chuyển sang model còn lại và tiếp tục xoay 3 Key. Không dùng Gemini 3.8 / 3.7 / 3.6.</div>
 <div class="section-title">🔑 Google Gemini API Keys (Hỗ trợ xoay vòng nhiều Key)</div>
 <label>Gemini API Key 1</label><input id="geminiKey1" value="${escapeHtml(geminiKeys[0])}" placeholder="AIzaSy...">
 <label>Gemini API Key 2</label><input id="geminiKey2" value="${escapeHtml(geminiKeys[1])}">
@@ -325,100 +323,207 @@ async function withGeminiKeySlot(key, fn) {
   }
 }
 
-async function callAI(prompt, geminiKeys, model) {
-  let lastError = 'Lỗi không xác định';
-  const keys = [...new Set((geminiKeys || []).filter(Boolean))];
-  if (!keys.length) return { result: '', error: 'Thiếu Gemini API Key.' };
+const geminiCooldowns = new Map();
 
-  // v3.9.11: selected model is primary. Try ALL available keys on that
-  // model before considering any model fallback. This keeps the 3 Google
-  // Projects useful instead of changing model after the first key fails.
-  const primaryModel = model || 'gemini-3.8-flash';
-  const fallbackModels = [...new Set([
-    'gemini-3.8-flash',
-    'gemini-3.7-flash',
-    'gemini-3.6-flash',
-    'gemini-3.5-flash-lite',
-    'gemini-2.5-flash'
-  ].filter(m => m && m !== primaryModel))];
-
-  const tryModelWithAllKeys = async modelName => {
-    let hadUsableFailure = false;
-    for (let keyIndex = 0; keyIndex < keys.length; keyIndex++) {
-      const key = keys[keyIndex];
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const response = await withGeminiKeySlot(key, async () => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`;
-            return axios.post(url, {
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: String(modelName).startsWith('gemini-3.')
-                ? { thinkingConfig: { thinkingLevel: 'low' } }
-                : { temperature: 0.2 }
-            }, {
-              timeout: 60000,
-              headers: { 'Content-Type': 'application/json' }
-            });
-          });
-
-          const result = response.data?.candidates?.[0]?.content?.parts
-            ?.map(p => p.text || '').join('').trim();
-          if (result) return { result, error: null, model: modelName, keyIndex: keyIndex + 1 };
-          lastError = `Gemini ${modelName} / key #${keyIndex + 1}: không trả về nội dung`;
-          break;
-        } catch (err) {
-          const status = err.response?.status;
-          const message = err.response?.data?.error?.message || err.message || `Gemini ${modelName}: lỗi không xác định`;
-          lastError = message;
-          console.error(`[Gemini ${modelName} / key #${keyIndex + 1}]`, message);
-
-          if (status === 401 || status === 403 || /invalid authentication credentials|api key not valid|invalid api key|authentication|unauthorized|permission denied/i.test(message)) {
-            console.warn(`[Gemini ${modelName}] key #${keyIndex + 1} authentication failure; trying next key.`);
-            break;
-          }
-
-          if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(message)) {
-            console.warn(`[Gemini ${modelName}] key #${keyIndex + 1} rate/quota limit; trying next key.`);
-            break;
-          }
-
-          if (status === 408 || status === 500 || status === 502 || status === 503 || /timeout|timed out|high demand|temporarily unavailable|unavailable/i.test(message)) {
-            if (attempt === 0) {
-              console.warn(`[Gemini ${modelName}] key #${keyIndex + 1} transient failure; retrying once.`);
-              continue;
-            }
-            console.warn(`[Gemini ${modelName}] key #${keyIndex + 1} transient failure; trying next key.`);
-            break;
-          }
-
-          hadUsableFailure = true;
-          break;
-        }
-      }
-    }
-    return { result: '', error: lastError, hadUsableFailure };
-  };
-
-  // IMPORTANT: all keys on the selected model first.
-  const primary = await tryModelWithAllKeys(primaryModel);
-  if (primary.result) return primary;
-
-  // Last-resort model fallback only after every configured key failed on the
-  // selected model. This prevents the old key -> model -> key pattern.
-  for (const fallbackModel of fallbackModels) {
-    const fallback = await tryModelWithAllKeys(fallbackModel);
-    if (fallback.result) return fallback;
-  }
-
-  return { result: '', error: lastError };
+function geminiCooldownKey(model, key) {
+  return `${model}::${key}`;
 }
 
-// Kept for health checks and compatibility. A pinned worker intentionally uses
-// one key only; the translation path below passes all configured keys so it can
-// fail over across projects on the same selected model.
+function getRetryAfterMs(message) {
+  const m = String(message || '').match(/retry(?: in| after)\s+([0-9]+(?:\.[0-9]+)?)s/i);
+  if (!m) return 0;
+  const seconds = Math.min(300, Math.max(5, Number(m[1])));
+  return seconds * 1000;
+}
+
+function markGeminiCooldown(model, key, ms) {
+  if (!model || !key || !ms) return;
+  geminiCooldowns.set(geminiCooldownKey(model, key), Date.now() + ms);
+}
+
+function isGeminiCoolingDown(model, key) {
+  const until = geminiCooldowns.get(geminiCooldownKey(model, key)) || 0;
+  if (!until) return false;
+  if (until <= Date.now()) {
+    geminiCooldowns.delete(geminiCooldownKey(model, key));
+    return false;
+  }
+  return true;
+}
+
+function buildGeminiModelOrder(selectedModel) {
+  const primary = selectedModel === 'gemini-2.5-flash'
+    ? 'gemini-2.5-flash'
+    : 'gemini-3.5-flash-lite';
+
+  const fallback = primary === 'gemini-3.5-flash-lite'
+    ? 'gemini-2.5-flash'
+    : 'gemini-3.5-flash-lite';
+
+  return [primary, fallback];
+}
+
+async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
+  const keys = [...new Set((geminiKeys || []).filter(Boolean))];
+  if (!keys.length) {
+    return { result: '', error: 'Thiếu Gemini API Key.' };
+  }
+
+  const models = buildGeminiModelOrder(model);
+  let lastError = 'Lỗi không xác định';
+  let attempted = 0;
+
+  // IMPORTANT:
+  // For EACH model, rotate through ALL available keys before changing model.
+  // Example: 3.5 + key2 -> key3 -> key1; only then fallback to 2.5 + key2 -> key3 -> key1.
+  const orderedKeys = keys.map((_, offset) =>
+    keys[(Math.max(0, startKeyIndex) + offset) % keys.length]
+  );
+
+  for (const modelName of models) {
+    let modelHadUsableKey = false;
+
+    for (let keyPos = 0; keyPos < orderedKeys.length; keyPos++) {
+      const key = orderedKeys[keyPos];
+
+      if (isGeminiCoolingDown(modelName, key)) {
+        console.log(`[Gemini ${modelName} / key #${keys.indexOf(key) + 1}] cooldown -> skip`);
+        continue;
+      }
+
+      modelHadUsableKey = true;
+      attempted++;
+
+      try {
+        const response = await withGeminiKeySlot(key, async () => {
+          const url =
+            `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`;
+
+          return axios.post(url, {
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: modelName === 'gemini-3.5-flash-lite'
+              ? { temperature: 0.2 }
+              : { temperature: 0.2 }
+          }, {
+            timeout: 60000,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        });
+
+        const result = response.data?.candidates?.[0]?.content?.parts
+          ?.map(p => p.text || '')
+          .join('')
+          .trim();
+
+        if (result) {
+          console.log(`[Gemini ${modelName} / key #${keys.indexOf(key) + 1}] success`);
+          return {
+            result,
+            error: null,
+            model: modelName,
+            keyIndex: keys.indexOf(key)
+          };
+        }
+
+        lastError = `Gemini ${modelName}: không trả về nội dung`;
+        console.warn(`[Gemini ${modelName} / key #${keys.indexOf(key) + 1}] empty response`);
+      } catch (err) {
+        const status = err.response?.status;
+        const message =
+          err.response?.data?.error?.message ||
+          err.message ||
+          `Gemini ${modelName}: lỗi không xác định`;
+
+        lastError = message;
+        console.error(`[Gemini ${modelName} / key #${keys.indexOf(key) + 1}]`, message);
+
+        // Invalid authentication / permission: don't waste another request.
+        if (
+          status === 401 || status === 403 ||
+          /invalid authentication credentials|api key not valid|invalid api key|authentication|unauthorized|permission denied/i.test(message)
+        ) {
+          markGeminiCooldown(modelName, key, 30 * 60 * 1000);
+          console.warn(`[Gemini ${modelName}] key #${keys.indexOf(key) + 1} auth failure -> cooldown 30m`);
+          continue;
+        }
+
+        // Quota/rate limit: use Google's retry-after when available, otherwise 60s.
+        if (
+          status === 429 ||
+          /RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(message)
+        ) {
+          const cooldown = getRetryAfterMs(message) || 60 * 1000;
+          markGeminiCooldown(modelName, key, cooldown);
+          console.warn(`[Gemini ${modelName}] key #${keys.indexOf(key) + 1} quota -> cooldown ${Math.ceil(cooldown / 1000)}s`);
+          continue;
+        }
+
+        // Transient server/high-demand errors: one retry on the same key is enough.
+        if (
+          status === 408 || status === 425 || status === 500 ||
+          status === 502 || status === 503 || status === 504 ||
+          /high demand|temporarily unavailable|timeout|timed out|ECONNRESET|ETIMEDOUT/i.test(message)
+        ) {
+          try {
+            const response = await withGeminiKeySlot(key, async () => {
+              const url =
+                `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`;
+
+              return axios.post(url, {
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.2 }
+              }, {
+                timeout: 60000,
+                headers: { 'Content-Type': 'application/json' }
+              });
+            });
+
+            const result = response.data?.candidates?.[0]?.content?.parts
+              ?.map(p => p.text || '')
+              .join('')
+              .trim();
+
+            if (result) {
+              console.log(`[Gemini ${modelName} / key #${keys.indexOf(key) + 1}] success on transient retry`);
+              return {
+                result,
+                error: null,
+                model: modelName,
+                keyIndex: keys.indexOf(key)
+              };
+            }
+          } catch (retryErr) {
+            const retryMsg =
+              retryErr.response?.data?.error?.message ||
+              retryErr.message ||
+              'transient retry failed';
+            lastError = retryMsg;
+            console.warn(`[Gemini ${modelName} / key #${keys.indexOf(key) + 1}] transient retry failed:`, retryMsg);
+          }
+          continue;
+        }
+
+        // Unknown error: move to the next key without repeated hammering.
+        continue;
+      }
+    }
+
+    if (!modelHadUsableKey) {
+      console.warn(`[Gemini ${modelName}] all keys are cooling down; moving to fallback model`);
+    } else {
+      console.warn(`[Gemini ${modelName}] all available keys failed; moving to fallback model`);
+    }
+  }
+
+  return {
+    result: '',
+    error: `Gemini failed after ${attempted} request attempt(s): ${lastError}`
+  };
+}
+
 async function callAIWithKey(prompt, key, model) {
   if (!key) return { result: '', error: 'Thiếu Gemini API Key.' };
-  return callAI(prompt, [key], model);
+  return callAI(prompt, [key], model, 0);
 }
 
 function stripMarkdownCodeFence(value) {
@@ -538,7 +643,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   const season = parts[1] ? parseInt(parts[1], 10) : null;
   const episode = parts[2] ? parseInt(parts[2], 10) : null;
   const hostUrl = makeHostUrl(req);
-  const modelToUse = config.model || 'gemini-3.8-flash';
+  const modelToUse = config.model || 'gemini-3.5-flash-lite';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -986,7 +1091,7 @@ app.get('/ai-test-all', async (req, res) => {
   const geminiKeys = (config.geminiKeys && config.geminiKeys.length > 0)
     ? config.geminiKeys
     : [process.env.GEMINI_API_KEY].filter(Boolean);
-  const requestedModel = req.query.model || config.model || 'gemini-3.8-flash';
+  const requestedModel = req.query.model || config.model || 'gemini-3.5-flash-lite';
 
   if (!geminiKeys.length) {
     return res.json({ ok: false, error: 'Chưa có Gemini API Key', keys: [] });
@@ -1016,7 +1121,7 @@ app.get('/ai-test', async (req, res) => {
     ? config.geminiKeys
     : [process.env.GEMINI_API_KEY].filter(Boolean);
 
-  const requestedModel = req.query.model || config.model || 'gemini-3.8-flash';
+  const requestedModel = req.query.model || config.model || 'gemini-3.5-flash-lite';
 
   if (!geminiKeys.length) {
     return res.json({
@@ -1101,7 +1206,7 @@ app.get('/translate-sub', async (req, res) => {
 
   try {
     const config = parseConfig(configQuery);
-    console.log('[translate-sub start]', JSON.stringify({ provider: provider || 'legacy', model: model || config.model || 'gemini-3.8-flash', imdbId: imdbId || '', type: type || '', season: season || '', episode: episode || '' }));
+    console.log('[translate-sub start]', JSON.stringify({ provider: provider || 'legacy', model: model || config.model || 'gemini-3.5-flash-lite', imdbId: imdbId || '', type: type || '', season: season || '', episode: episode || '' }));
     const geminiKeys = (config.geminiKeys && config.geminiKeys.length > 0)
       ? config.geminiKeys
       : [process.env.GEMINI_API_KEY].filter(Boolean);
@@ -1110,7 +1215,7 @@ app.get('/translate-sub', async (req, res) => {
       return res.send('1\n00:00:01,000 --> 00:00:08,000\n[LỖI]: Chưa có Gemini API Key.');
     }
 
-    const selectedModel = model || config.model || 'gemini-3.8-flash';
+    const selectedModel = model || config.model || 'gemini-3.5-flash-lite';
     const sourceCacheId = url || `${provider || ''}|${fileId || ''}|${sourceUrl || ''}|${subtitleId || ''}`;
     cacheKey = makeTranslationCacheKey({ url: sourceCacheId, model: selectedModel, imdbId, type, season, episode });
 
@@ -1285,7 +1390,7 @@ NGUYÊN TẮC XƯNG HÔ:
 SRT CẦN DỊCH:
 ${chunks[i]}`;
 
-      const aiRes = await callAI(prompt, geminiKeys.slice(0, 3), selectedModel);
+      const aiRes = await callAI(prompt, workerKeys, selectedModel, workerIndex);
 
       if (!aiRes.result) {
         console.error(`[Gemini translation chunk ${i + 1}/${chunks.length}]`, aiRes.error);
@@ -1304,16 +1409,16 @@ ${chunks[i]}`;
       });
     };
 
-    // Three parallel workers. Each chunk tries all configured keys on the
-    // selected model first; keys/projects provide failover instead of model
-    // hopping after the first key failure.
+    // Distribute chunks across up to 3 workers.
+    // Each worker starts with a different key, then callAI() rotates through
+    // the remaining keys on the SAME model before falling back to the other model.
     const workerKeys = geminiKeys.slice(0, 3);
-    const worker = async (workerIndex, workerKey) => {
+    const worker = async (workerIndex) => {
       for (let i = workerIndex; i < chunks.length; i += workerKeys.length) {
-        await translateChunk(i, workerKey);
+        await translateChunk(i, workerIndex);
       }
     };
-    await Promise.all(workerKeys.map((key, index) => worker(index, key)));
+    await Promise.all(workerKeys.map((_, index) => worker(index)));
 
     // Workers finish out of order; restore the original SRT chunk order.
     translated.sort((a, b) => a.index - b.index);
