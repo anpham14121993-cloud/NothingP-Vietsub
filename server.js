@@ -1,4 +1,4 @@
-// NothingP AIOsubtitles v3.9.57 — Character Guide + 20K/150 + unlimited parallel per-key + 15 RPM/key
+// NothingP AIOsubtitles v3.9.58 — Compact 7-Layer Guide + 20K/150 + unlimited parallel per-key + 15 RPM/key
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -79,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.57</h2>
+<h2>NothingP AIOsubtitles v3.9.58</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -894,119 +894,40 @@ async function buildCharacterRelationshipGuide({
   geminiKeys,
   model
 }) {
-  // v3.9.57: six-layer Character/Relationship Guide.
-  // The guide is intentionally compact and is generated once per episode/job,
-  // then reused by every translation chunk.
-  const prompt = `Bạn là chuyên gia bản địa hóa phụ đề phim Việt Nam và phân tích nhân vật, quan hệ, xưng hô.
+  // v3.9.58: compact seven-layer Character/Relationship Guide.
+  // Generated once per episode/job, then reused by every translation chunk.
+  const prompt = `Bạn là chuyên gia bản địa hóa phụ đề phim Việt Nam.
 
-NHIỆM VỤ:
-Trước khi dịch phụ đề, hãy xây dựng "Character & Relationship Guide" riêng cho CHÍNH TẬP PHIM này.
-Guide bắt buộc có ĐÚNG 6 LỚP sau:
+TẠO GUIDE 7 LỚP CỰC GỌN cho CHÍNH TẬP PHIM này. Chỉ ghi thông tin thực sự hữu ích cho việc dịch.
+Không giải thích ngoài JSON. Không suy đoán. Nếu không có bằng chứng thì dùng [] hoặc "".
 
-LỚP 1 — NHÂN VẬT
-- Chỉ ghi nhân vật thực sự xuất hiện hoặc được nhắc đến trong câu chuyện.
-- Tên, bí danh/cách gọi, giới tính chỉ khi có bằng chứng trong nội dung/thoại.
-- Có thể ghi vai trò/chức vụ khi có căn cứ.
+7 LỚP:
+1. Nhân vật: tên, alias, vai trò nếu có căn cứ.
+2. Quan hệ: các quan hệ quan trọng giữa nhân vật.
+3. Xưng hô: cách A gọi B và B gọi A theo bối cảnh.
+4. Thay đổi quan hệ: chỉ ghi thay đổi xảy ra trong tập.
+5. Giọng nhân vật: 1-2 từ mô tả phong cách nói nếu có căn cứ.
+6. Thuật ngữ: tên riêng/chức danh/thuật ngữ cần dịch nhất quán.
+7. Tóm tắt: tổng quan phim 1 câu + nội dung tập 1-2 câu, chỉ lấy từ thông tin phim và bằng chứng tập.
 
-LỚP 2 — QUAN HỆ
-- Phân tích các cặp nhân vật quan trọng: cha-con, mẹ-con, vợ-chồng, người yêu, anh-em, bạn bè, cấp trên-cấp dưới, thầy-trò, đối thủ, người lạ...
-- Ghi trạng thái quan hệ hiện tại trong tập và hướng quan hệ A→B / B→A.
+QUY TẮC:
+- Chỉ dùng movieContext và subtitleSample của chính phim/tập.
+- Bỏ qua hoàn toàn cast/credits; không suy luận nhân vật từ diễn viên.
+- Không bịa tuổi, giới tính, quan hệ, vai vế, tình cảm hay tình tiết.
+- Ưu tiên thoại và nội dung tập khi có mâu thuẫn với metadata.
+- Guide phải ngắn, tổng mục tiêu khoảng 1.500-2.500 ký tự.
+- Mỗi mục chỉ giữ dữ liệu có giá trị cho bản dịch; không kể lại cốt truyện dài.
+- Kết quả phải là JSON hợp lệ, không markdown.
 
-LỚP 3 — XƯNG HÔ
-- Xác định cách xưng/gọi bằng tiếng Việt theo quan hệ và bối cảnh.
-- Có thể tách các tình huống bình thường, thân mật, tức giận, công khai, trang trọng.
-- Nếu chưa đủ bằng chứng thì ghi "chưa xác định".
-
-LỚP 4 — THAY ĐỔI QUAN HỆ
-- Ghi những thay đổi quan hệ/xưng hô xảy ra trong chính tập phim.
-- Nêu sự kiện làm thay đổi, quan hệ từ → đến và ảnh hưởng tới xưng hô.
-- Nếu không có thay đổi rõ ràng thì trả mảng rỗng.
-
-LỚP 5 — GIỌNG NHÂN VẬT
-- Mô tả ngắn phong cách nói của từng nhân vật khi có căn cứ: lạnh lùng, cộc, lịch sự, thân mật, trang trọng, hài hước, đe dọa, trẻ con...
-- Không suy đoán chỉ từ diễn viên hoặc giới tính.
-
-LỚP 6 — THUẬT NGỮ
-- Ghi các tên riêng, chức danh, biệt danh, thuật ngữ chuyên môn/bối cảnh và cách dịch tiếng Việt nên thống nhất.
-- Chỉ thêm thuật ngữ có căn cứ từ nội dung phim/thoại.
-
-QUY TẮC RẤT QUAN TRỌNG:
-- CHỈ dùng nội dung phim, tóm tắt/cốt truyện và mẫu phụ đề của CHÍNH TẬP để phân tích.
-- KHÔNG lấy hoặc suy luận thông tin từ danh sách diễn viên, tên người đóng vai, đạo diễn, biên kịch, nhà sản xuất hay ê-kíp.
-- Nếu nguồn có phần cast/credits thì BỎ QUA hoàn toàn; tên diễn viên không phải tên nhân vật.
-- Không tự bịa tuổi, giới tính, quan hệ, vai vế, quyền lực, tình cảm hoặc tình tiết.
-- Khi không đủ bằng chứng, dùng "chưa xác định" hoặc confidence thấp thay vì đoán.
-- Ưu tiên bằng chứng trực tiếp từ thoại và tóm tắt/cốt truyện của CHÍNH TẬP.
-- Ưu tiên trạng thái quan hệ tại thời điểm lời thoại được nói.
-- Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, bản dịch phải ưu tiên bằng chứng mới và giữ nhất quán về sau.
-- Nếu có mâu thuẫn giữa metadata và phụ đề, ưu tiên bằng chứng nội dung rõ ràng hơn và giảm confidence khi cần.
-- Với cổ trang/fantasy/quân đội/học đường/công sở/tội phạm..., điều chỉnh xưng hô và thuật ngữ theo bối cảnh thực tế của phim.
-- Guide phải ngắn gọn để có thể đưa vào mọi chunk dịch; evidence chỉ là căn cứ ngắn, không kể lại cốt truyện.
-- Kết quả phải là JSON hợp lệ, không markdown, không giải thích ngoài JSON.
-
-ĐỊNH DẠNG JSON BẮT BUỘC — ĐÚNG 6 LỚP:
+JSON BẮT BUỘC:
 {
-  "characters": [
-    {
-      "name": "",
-      "aliases": [],
-      "presence": "appears|mentioned",
-      "gender": "male|female|unknown",
-      "role": "",
-      "voice": "",
-      "confidence": "high|medium|low",
-      "e": ""
-    }
-  ],
-  "relationships": [
-    {
-      "a": "",
-      "b": "",
-      "relation": "",
-      "status": "",
-      "a_to_b": "",
-      "b_to_a": "",
-      "pronouns": {
-        "normal": "",
-        "intimate": "",
-        "angry": "",
-        "public": "",
-        "formal": ""
-      },
-      "confidence": "high|medium|low",
-      "e": ""
-    }
-  ],
-  "changes": [
-    {
-      "a": "",
-      "b": "",
-      "event": "",
-      "from": "",
-      "to": "",
-      "pronoun_effect": "",
-      "e": ""
-    }
-  ],
-  "terms": [
-    {
-      "source": "",
-      "target": "",
-      "type": "",
-      "e": ""
-    }
-  ],
-  "global_pronouns": ""
+  "characters": [{"name":"","aliases":[],"presence":"appears|mentioned","gender":"male|female|unknown","role":"","voice":""}],
+  "relationships": [{"a":"","b":"","relation":"","status":"","a_to_b":"","b_to_a":"","pronouns":{"normal":"","intimate":"","angry":"","public":"","formal":""}}],
+  "changes": [{"a":"","b":"","event":"","from":"","to":"","pronoun_effect":""}],
+  "terms": [{"source":"","target":"","type":""}],
+  "summary": {"series":"","episode":""},
+  "global_pronouns":""
 }
-
-YÊU CẦU CHẤT LƯỢNG:
-- characters = Lớp 1 + voice là dữ liệu cho Lớp 5.
-- relationships + pronouns = Lớp 2 + Lớp 3.
-- changes = Lớp 4.
-- terms = Lớp 6.
-- Không bỏ qua changes/terms chỉ vì khó xác định; nếu không có bằng chứng thì dùng [] và "" tương ứng.
-- Mỗi mục quan trọng nên có evidence/e ngắn gọn, tối đa khoảng 120 ký tự.
-- Giữ tổng guide gọn, mục tiêu khoảng ≤4.000 ký tự.
 
 THÔNG TIN PHIM:
 ${movieContext}
@@ -1016,7 +937,6 @@ ${subtitleSample}`;
 
   const guideRes = await callAI(prompt, geminiKeys, model);
   if (!guideRes.result) return '';
-
   return parseRelationshipGuide(guideRes.result);
 }
 
@@ -1678,7 +1598,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.57',
+    'v3.9.58',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -2094,7 +2014,7 @@ app.get('/translate-sub', async (req, res) => {
   Thông tin phim từ Cinemeta/IMDb/Wikipedia:
   ${movieContext}
 
-  Character/Relationship Guide 6 lớp (do AI xây dựng từ dữ liệu ở trên):
+  Character/Relationship Guide 7 lớp (do AI xây dựng từ dữ liệu ở trên):
   ${relationshipGuide || 'Chưa có bảng phân tích; chỉ sử dụng thông tin phim và mẫu thoại làm bằng chứng.'}
 
   Mẫu thoại tham chiếu:
@@ -2102,8 +2022,8 @@ app.get('/translate-sub', async (req, res) => {
 
   QUY TẮC SỬ DỤNG BẢNG:
   - Bảng là ngữ cảnh tham chiếu, không phải nội dung cần dịch.
-  - Ưu tiên quan hệ/xưng hô/thuật ngữ có confidence cao; với medium/low chỉ dùng khi không có bằng chứng mâu thuẫn rõ ràng.
-  - Guide gồm 6 lớp: Nhân vật, Quan hệ, Xưng hô, Thay đổi quan hệ, Giọng nhân vật, Thuật ngữ.
+  - Ưu tiên quan hệ/xưng hô/thuật ngữ có bằng chứng rõ ràng; nếu chưa chắc thì không tự suy đoán.
+  - Guide gồm 7 lớp: Nhân vật, Quan hệ, Xưng hô, Thay đổi quan hệ, Giọng nhân vật, Thuật ngữ, Tóm tắt phim/tập.
   - Khi quan hệ thay đổi trong tập, ưu tiên trạng thái mới và áp dụng hiệu ứng xưng hô từ lớp Thay đổi quan hệ.
   - Không tự bịa quan hệ, tuổi, vai vế hoặc bối cảnh chưa được nguồn/bằng chứng hỗ trợ.
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
@@ -2116,7 +2036,7 @@ app.get('/translate-sub', async (req, res) => {
       // Never write to res from the background task.
       const baseWorkerKeysForLog = geminiKeys.slice(0, 3);
       const maxWorkerCountForLog = chunks.length;
-      // v3.9.57: keep 20k/150-cue chunks. All chunks may run concurrently and
+      // v3.9.58: keep 20k/150-cue chunks. All chunks may run concurrently and
       // may share the same key; the ONLY Gemini scheduler limit is 15 request
       // starts per rolling 60 seconds for each individual key.
       // The visible status message uses the requested simple movie/series estimate.
@@ -2127,85 +2047,142 @@ app.get('/translate-sub', async (req, res) => {
       // themselves take longer than the 8s per-project request-start interval.
       // The limiter in callAI() enforces the hard 15 request-starts/60s/key cap.
       // v3.9.48 CUE REPAIR: when Gemini drops only a few cues, do NOT
-      // retransate the whole 100-cue chunk. Detect the missing source cues by
-      // their original timestamps, translate only those cues, then rebuild the
-      // chunk from the original timeline. This prevents the 90s+ full-chunk
-      // repair seen in production logs for a 100 -> 99 mismatch.
+      // Detect failed source cues by their original timestamps, repair ONLY those
+      // cues, then rebuild the chunk from the original timeline. No whole-chunk
+      // retranslations or recursive cascade are used on the repair path.
       const cueIdentity = cue => `${cue.start}|${cue.end}`;
 
-      const mergeMissingCueRepairs = async (sourceChunk, translatedText, label, orderedKeys) => {
+      // v3.9.58: repair ONLY the exact cues that failed validation.
+      // Successful cues from the original Gemini response are never retransated.
+      const getCueRepairTargets = (sourceCues, translatedCues) => {
+        const targets = [];
+        const sourceIds = new Set(sourceCues.map(cueIdentity));
+        const translatedById = new Map();
+        for (const cue of translatedCues) {
+          const id = cueIdentity(cue);
+          if (sourceIds.has(id) && !translatedById.has(id) && String(cue.body || '').trim()) {
+            translatedById.set(id, cue);
+          }
+        }
+
+        // Missing/empty cues are repaired by their original source timestamp.
+        for (const source of sourceCues) {
+          const id = cueIdentity(source);
+          if (!translatedById.has(id)) targets.push(source);
+        }
+
+        // If timestamps were changed but cue count otherwise matches, compare by index.
+        if (!targets.length && translatedCues.length === sourceCues.length) {
+          for (let i = 0; i < sourceCues.length; i++) {
+            const source = sourceCues[i];
+            const translated = translatedCues[i];
+            if (
+              source.start !== translated.start ||
+              source.end !== translated.end ||
+              !String(translated.body || '').trim()
+            ) {
+              targets.push(source);
+            }
+          }
+        }
+
+        const seen = new Set();
+        return targets.filter(cue => {
+          const id = cueIdentity(cue);
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+      };
+
+      const repairSingleCue = async (cue, label, orderedKeys, chunkIndex = -1) => {
+        const oneCueSrt = `1\n${srtMs(cue.start)} --> ${srtMs(cue.end)}\n${cue.body}`;
+        const repairPrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp.
+
+Dịch DUY NHẤT 1 cue sau sang tiếng Việt tự nhiên.
+- Chỉ sửa/dịch đúng cue này; KHÔNG dịch lại bất kỳ cue nào khác.
+- Giữ nguyên tuyệt đối timestamp.
+- Trả về đúng 1 cue SRT.
+- Chỉ trả về SRT, không markdown, không giải thích.
+${contextGuide}${chunkIndex >= 0 ? buildOverlapPrompt(chunkIndex) : ''}
+
+CUE CẦN SỬA:
+${oneCueSrt}`;
+
+        let lastError = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const result = await callAIWithModelFallback(repairPrompt, orderedKeys, selectedModel, 0);
+          if (!result?.result) {
+            lastError = new Error(`${label}: không có kết quả`);
+            continue;
+          }
+          const parsed = parseSrtCues(result.result);
+          if (
+            parsed.length === 1 &&
+            parsed[0].start === cue.start &&
+            parsed[0].end === cue.end &&
+            String(parsed[0].body || '').trim()
+          ) {
+            return parsed[0];
+          }
+          lastError = new Error(`${label}: kết quả repair không hợp lệ`);
+        }
+        throw lastError || new Error(`${label}: repair thất bại`);
+      };
+
+      const mergeFailedCueRepairs = async (sourceChunk, translatedText, label, orderedKeys, chunkIndex = -1) => {
         const sourceCues = parseSrtCues(sourceChunk);
         const translatedCues = parseSrtCues(translatedText || '');
         if (!sourceCues.length || !translatedCues.length) return null;
 
-        const sourceMap = new Map(sourceCues.map(c => [cueIdentity(c), c]));
-        const translatedMap = new Map();
+        const targets = getCueRepairTargets(sourceCues, translatedCues);
+        if (!targets.length) return null;
+
+        console.warn(`🩹 [Gemini AI] ${label}: phát hiện ${targets.length} cue lỗi/thiếu; CHỈ repair các cue này.`);
+
+        const translatedById = new Map();
         for (const cue of translatedCues) {
           const id = cueIdentity(cue);
-          if (sourceMap.has(id) && !translatedMap.has(id) && String(cue.body || '').trim()) {
-            translatedMap.set(id, cue);
+          if (!translatedById.has(id) && String(cue.body || '').trim()) {
+            translatedById.set(id, cue);
           }
         }
 
-        let missing = sourceCues.filter(c => !translatedMap.has(cueIdentity(c)));
-        // If counts match but timestamps were altered/reordered, repair by source index
-        // instead of accepting a structurally wrong result. Only repair the small
-        // number of affected cues; never retransate the entire chunk.
-        if (!missing.length && translatedCues.length === sourceCues.length) {
-          const badByIndex = [];
-          for (let i = 0; i < sourceCues.length; i++) {
-            if (translatedCues[i].start !== sourceCues[i].start || translatedCues[i].end !== sourceCues[i].end) {
-              badByIndex.push(i);
-            }
-          }
-          if (badByIndex.length && badByIndex.length <= 5) {
-            missing = badByIndex.map(i => sourceCues[i]);
-          }
-        }
-        if (!missing.length || missing.length > 5) return null;
+        // Repair individual cues concurrently. The existing per-key 15 RPM limiter
+        // remains the only request-start gate; no whole-chunk retranslations occur.
+        const repaired = await Promise.all(targets.map(async (cue, index) => {
+          const repairedCue = await repairSingleCue(
+            cue,
+            `${label} cue ${index + 1}/${targets.length}`,
+            orderedKeys,
+            chunkIndex
+          );
+          return repairedCue;
+        }));
 
-        console.warn(`🩹 [Gemini AI] ${label}: phát hiện ${missing.length} cue thiếu theo timestamp; chỉ repair cue thiếu.`);
-
-        const repaired = [];
-        for (let i = 0; i < missing.length; i++) {
-          const cue = missing[i];
-          const oneCueSrt = `1\n${srtMs(cue.start)} --> ${srtMs(cue.end)}\n${cue.body}`;
-          const repairPrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp.
-
-Dịch DUY NHẤT cue SRT sau sang tiếng Việt tự nhiên.
-- Bắt buộc trả về đúng 1 cue.
-- Giữ nguyên tuyệt đối timestamp.
-- Không bỏ cue, không gộp, không tách.
-- Chỉ dịch phần thoại.
-- Chỉ trả về SRT, không markdown, không giải thích.
-
-${contextGuide}
-
-CUE CẦN REPAIR:
-${oneCueSrt}`;
-          const result = await callAIWithModelFallback(repairPrompt, orderedKeys, selectedModel, 0);
-          if (!result?.result) throw new Error(`${label}: repair cue ${i + 1} không có kết quả`);
-          const parsed = parseSrtCues(result.result);
-          if (parsed.length !== 1) throw new Error(`${label}: repair cue ${i + 1} trả ${parsed.length} cue`);
-          const repairedCue = parsed[0];
-          if (repairedCue.start !== cue.start || repairedCue.end !== cue.end || !String(repairedCue.body || '').trim()) {
-            throw new Error(`${label}: repair cue ${i + 1} sai timestamp`);
-          }
-          translatedMap.set(cueIdentity(cue), repairedCue);
-          repaired.push(cueIdentity(cue));
+        for (const cue of repaired) {
+          translatedById.set(cueIdentity(cue), cue);
         }
 
-        const merged = sourceCues.map(c => {
-          const t = translatedMap.get(cueIdentity(c));
+        const merged = sourceCues.map(source => {
+          const translated = translatedById.get(cueIdentity(source));
           return {
-            start: c.start,
-            end: c.end,
-            body: String(t?.body || '').trim()
+            start: source.start,
+            end: source.end,
+            body: String(translated?.body || '').trim()
           };
         });
-        if (merged.some(c => !c.body)) return null;
-        console.log(`🩹 [Gemini AI] ${label}: repair ${repaired.length}/${missing.length} cue thành công.`);
-        return buildSrtFromCues(merged);
+        if (merged.some(cue => !cue.body)) {
+          throw new Error(`${label}: vẫn còn cue chưa có nội dung sau repair`);
+        }
+
+        const result = buildSrtFromCues(merged);
+        const finalCheck = validateCueStructure(sourceChunk, result, label);
+        if (!finalCheck.ok) {
+          throw new Error(`${label}: repair cue vẫn sai cấu trúc: ${finalCheck.reason}`);
+        }
+        console.log(`🩹 [Gemini AI] ${label}: repair đúng ${repaired.length}/${targets.length} cue lỗi.`);
+        return result;
       };
 
       const validateCueStructure = (sourceChunk, translatedText, label) => {
@@ -2230,11 +2207,6 @@ ${oneCueSrt}`;
         return { ok: true, sourceCues, translatedCues };
       };
 
-      // v3.9.48/49: overlap context — carry the tail of the PREVIOUS source chunk
-      // into the next chunk prompt so dialogue/relationship context is not cut at
-      // the chunk boundary. This is context only; Gemini must NOT translate it.
-      // Keep the overlap small to improve continuity without materially increasing
-      // prompt size or Gemini latency.
       const OVERLAP_CONTEXT_CUES = 12;
       const getOverlapContext = (chunkIndex) => {
         if (chunkIndex <= 0) return '';
@@ -2278,27 +2250,19 @@ NGUYÊN TẮC XƯNG HÔ:
 
 SRT CẦN DỊCH:
 ${sourceChunk}`;
-        let last = null;
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          const prompt = attempt === 1 ? basePrompt : `${basePrompt}
 
-CẢNH BÁO SỬA LỖI:
-Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedCueCount}/${expectedCueCount} cue theo đúng thứ tự. Không gộp, không tách, không bỏ sót cue.`;
-          last = await callAIWithModelFallback(prompt, orderedKeys, selectedModel, 0);
-          if (!last.result) continue;
+        const last = await callAIWithModelFallback(basePrompt, orderedKeys, selectedModel, 0);
+        if (last?.result) {
           const validation = validateCueStructure(sourceChunk, last.result, label);
-          const returned = validation.translatedCues.length;
-          console.log(`[Gemini AI] Kiểm tra ${label}: nguồn=${expectedCueCount}, dịch=${returned}, timestamp=${validation.ok ? 'OK' : 'MISMATCH'}, attempt=${attempt}`);
+          console.log(`[Gemini AI] Kiểm tra ${label}: nguồn=${expectedCueCount}, dịch=${validation.translatedCues.length}, timestamp=${validation.ok ? 'OK' : 'MISMATCH'}`);
           if (validation.ok) return last.result.trim();
-        }
-        const returned = last?.result ? parseSrtCues(last.result).length : 0;
-        if (last?.result && returned !== expectedCueCount) {
-          const repaired = await mergeMissingCueRepairs(sourceChunk, last.result, label, orderedKeys);
+
+          const repaired = await mergeFailedCueRepairs(sourceChunk, last.result, label, orderedKeys, chunkIndex);
           if (repaired && parseSrtCues(repaired).length === expectedCueCount) {
             return repaired.trim();
           }
         }
-        throw new Error(`${label}: cue mismatch (${expectedCueCount} → ${returned})`);
+        throw new Error(`${label}: không thể hoàn tất sau khi chỉ repair cue lỗi`);
       };
 
       const translateChunk = async (i, workerKey, workerIndex = 0) => {
@@ -2316,64 +2280,8 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
           statusState.done = translated.length;
           console.log(`✅ [Gemini AI] Xong chunk ${i + 1}/${chunks.length} | ${((Date.now() - startedAt) / 1000).toFixed(1)}s | ${expectedCueCount} cue`);
         } catch (firstErr) {
-          console.warn(`⚠️ [Gemini AI] Chunk ${i + 1}/${chunks.length} lỗi cue; kích hoạt repair cascade: ${firstErr.message}`);
-
-          // v3.9.48: do not fail a whole 100-cue chunk because Gemini dropped
-          // one or two cues. Retry only the problematic piece, then recursively
-          // reduce the cue size. This keeps the normal path fast while making
-          // pathological cue-dense sections progressively easier for Gemini.
-          const translateCascade = async (piece, label, keys, depth = 0, chunkIndex = -1) => {
-            const cueCount = parseSrtCues(piece).length;
-            try {
-              return await translateOneValidated(piece, label, keys, cueCount, chunkIndex);
-            } catch (err) {
-              if (cueCount <= 1) throw err;
-
-              let nextMax;
-              if (cueCount > 50) nextMax = 50;
-              else if (cueCount > 25) nextMax = 25;
-              else if (cueCount > 10) nextMax = 10;
-              else if (cueCount > 5) nextMax = 5;
-              else nextMax = 1;
-
-              const smaller = splitSrtByCueCount(piece, nextMax);
-              if (smaller.length <= 1) throw err;
-              console.warn(`🛠️ [Gemini AI] Cascade ${label}: ${cueCount} cue thất bại → ${smaller.length} phần x tối đa ${nextMax} cue`);
-
-              // Cascade pieces are deliberately processed sequentially here.
-              // The normal top-level workers already provide concurrency; spawning
-              // another Promise.all at every cascade depth can create a request storm
-              // and makes RPM/TPM limits much easier to hit.
-              const results = [];
-              for (let subIndex = 0; subIndex < smaller.length; subIndex++) {
-                const subPiece = smaller[subIndex];
-                // Rotate only within the key list passed to this cascade level.
-                // Do not reference translateChunk-local variables here: the
-                // cascade is intentionally self-contained and recursive.
-                const startKey = (depth + subIndex) % Math.max(1, keys.length);
-                const subKeys = keys.slice(startKey).concat(keys.slice(0, startKey));
-                const text = await translateCascade(subPiece, `${label}.${subIndex + 1}`, subKeys, depth + 1, chunkIndex);
-                results.push({ index: subIndex, text });
-              }
-
-              results.sort((a, b) => a.index - b.index);
-              const joined = results.map(x => x.text).join('\n\n');
-              const joinedCount = parseSrtCues(joined).length;
-              if (joinedCount !== cueCount) {
-                throw new Error(`${label}: cascade cue mismatch (${cueCount} → ${joinedCount})`);
-              }
-              return joined;
-            }
-          };
-
-          const repairedText = await translateCascade(sourceChunk, `repair ${i + 1}`, baseWorkerKeys.slice(primaryIndex).concat(baseWorkerKeys.slice(0, primaryIndex)), 0, i);
-          const repairedCueCount = parseSrtCues(repairedText).length;
-          if (repairedCueCount !== expectedCueCount) {
-            throw new Error(`Chunk ${i + 1}: repair cascade cue mismatch (${expectedCueCount} → ${repairedCueCount})`);
-          }
-          translated.push({ index: i, text: repairedText });
-          statusState.done = translated.length;
-          console.log(`✅ [Gemini AI] Repair cascade xong chunk ${i + 1}/${chunks.length} | ${((Date.now() - startedAt) / 1000).toFixed(1)}s | ${expectedCueCount} cue`);
+          console.error(`❌ [Gemini AI] Chunk ${i + 1}/${chunks.length} thất bại sau khi chỉ repair cue lỗi: ${firstErr.message}`);
+          throw firstErr;
         }
       };
 
@@ -2382,7 +2290,7 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
 
       console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} chunk task | ${baseWorkerKeys.length} key | không giới hạn request đồng thời/key | hard cap 15 request starts/60s/key`);
 
-      // v3.9.57: launch every chunk task immediately. Keys are assigned
+      // v3.9.58: launch every chunk task immediately. Keys are assigned
       // round-robin so the first 3 chunks use key 1/2/3, and later chunks may
       // reuse those keys concurrently. There is NO worker-per-key cap.
       // reserveGeminiRequestSlot() is the only gate and limits request STARTS
