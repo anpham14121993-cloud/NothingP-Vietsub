@@ -78,7 +78,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.34</h2>
+<h2>NothingP AIOsubtitles v3.9.44</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -139,7 +139,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.40',
+  version: '3.9.44',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -151,7 +151,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.40', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.44', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -625,8 +625,9 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           .trim();
 
         if (result) {
-          console.log(`[Gemini ${selectedModel} / key #${keyIndex + 1}] success`);
-          return { result, error: null, model: selectedModel, keyIndex };
+          const actualKeyIndex = (start + keyIndex) % keys.length;
+          console.log(`[Gemini ${selectedModel} / key #${actualKeyIndex + 1}] success`);
+          return { result, error: null, model: selectedModel, keyIndex: actualKeyIndex };
         }
 
         lastError = `Gemini ${selectedModel}: không trả về nội dung`;
@@ -639,18 +640,27 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           `Gemini ${selectedModel}: lỗi không xác định`;
 
         lastError = message;
-        console.error(`[Gemini ${selectedModel} / key #${keyIndex + 1}]`, message);
+        const actualKeyIndex = (start + keyIndex) % keys.length;
+        console.error(`[Gemini ${selectedModel} / key #${actualKeyIndex + 1}]`, message);
 
         if (
           status === 401 || status === 403 ||
           /invalid authentication credentials|api key not valid|invalid api key|authentication|unauthorized|permission denied/i.test(message)
         ) {
-          console.warn(`[Gemini ${selectedModel}] key #${keyIndex + 1} authentication failure; trying next key on SAME model.`);
+          console.warn(`[Gemini ${selectedModel}] key #${actualKeyIndex + 1} authentication failure; trying next key on SAME model.`);
           break;
         }
 
         if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(message)) {
-          console.warn(`[Gemini ${selectedModel}] key #${keyIndex + 1} rate/quota limit; trying next key on SAME model.`);
+          // A 429 may be a short RPM/TPM burst limit. The hard limiter prevents
+          // normal bursts, but an upstream Retry-After should still be honored.
+          const retryAfter = Number(err.response?.headers?.['retry-after']);
+          if (Number.isFinite(retryAfter) && retryAfter > 0 && retryAfter <= 15) {
+            console.warn(`[Gemini ${selectedModel}] key #${actualKeyIndex + 1} 429; waiting ${retryAfter}s before rotating.`);
+            await new Promise(r => setTimeout(r, retryAfter * 1000));
+          } else {
+            console.warn(`[Gemini ${selectedModel}] key #${actualKeyIndex + 1} rate/quota limit; rotating to next key.`);
+          }
           break;
         }
 
@@ -658,7 +668,7 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
         // temporary network failure. Retrying the same key wastes time and can
         // make the request queue longer, so move to the next project/key immediately.
         if (/high demand/i.test(message)) {
-          console.warn(`[Gemini ${selectedModel}] key #${keyIndex + 1} high-demand response; immediately trying next key on SAME model.`);
+          console.warn(`[Gemini ${selectedModel}] key #${actualKeyIndex + 1} high-demand response; immediately trying next key on SAME model.`);
           break;
         }
 
@@ -667,7 +677,7 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           status === 503 || status === 504 ||
           /temporarily unavailable|timeout|timed out|ECONNRESET|ETIMEDOUT/i.test(message)
         ) {
-          console.warn(`[Gemini ${selectedModel}] key #${keyIndex + 1} transient failure; immediately trying next key on SAME model.`);
+          console.warn(`[Gemini ${selectedModel}] key #${actualKeyIndex + 1} transient failure; immediately trying next key on SAME model.`);
           break;
         }
 
@@ -678,7 +688,8 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
 
   return {
     result: '',
-    error: `Gemini ${selectedModel} failed on all ${keys.length} key(s): ${lastError}`
+    error: `Gemini ${selectedModel} failed on all ${keys.length} key(s): ${lastError}`,
+    failedAllKeys: true
   };
 }
 
@@ -708,8 +719,18 @@ async function callAIWithModelFallback(prompt, geminiKeys, primaryModel, startKe
     };
   }
 
+  const primaryError = String(primary?.error || '');
+  const shouldFallback =
+    /high demand|temporarily unavailable|timeout|timed out|ECONNRESET|ETIMEDOUT|503|502|504|500/i.test(primaryError) &&
+    !/quota|resource_exhausted|rate.?limit|api key|authentication|unauthorized|permission denied/i.test(primaryError);
+
+  if (!shouldFallback) {
+    console.warn(`[Gemini model fallback] skipped for non-transient failure: ${primaryError.slice(0, 180)}`);
+    return primary;
+  }
+
   console.warn(
-    `[Gemini model fallback] ${requested} failed; retrying SAME chunk with ${fallbackModel}`
+    `[Gemini model fallback] ${requested} failed transiently; retrying SAME chunk with ${fallbackModel}`
   );
 
   const fallback = await callAI(prompt, geminiKeys, fallbackModel, startKeyIndex);
@@ -993,7 +1014,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   //
   // Bump this constant only when intentionally invalidating old client-side
   // subtitle URLs after a future protocol/response change.
-  const aiUrlVersion = '3.9.40';
+  const aiUrlVersion = '3.9.44';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -1553,7 +1574,7 @@ app.get('/ai-test', async (req, res) => {
 // In-memory translation cache. This is especially useful on Android/Android TV,
 // where a slow subtitle URL may be requested more than once. Completed results
 // are reused immediately on later subtitle requests.
-// v3.9.40: cache the character/relationship guide per show+model so later
+// v3.9.44: cache the character/relationship guide per show+model so later
 // episodes do not pay the extra Gemini guide-generation request again.
 const characterGuideCache = new Map();
 const CHARACTER_GUIDE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -1563,7 +1584,7 @@ const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TRANSLATION_CACHE_MAX = 40;
 const translationInFlight = new Map();
 
-// v3.9.40: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
+// v3.9.44: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
 // previous episode and request it again when a new episode opens. Old URLs must
 // not start Gemini or return the temporary status subtitle.
 const subtitleActivation = new Map();
@@ -1625,7 +1646,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.40',
+    'v3.9.44',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -1741,7 +1762,7 @@ function writeLiveStatus(res, state, force = false) {
 
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target, gate } = req.query;
-  // v3.9.40 diagnostic: capture the client request fingerprint so we can verify
+  // v3.9.44 diagnostic: capture the client request fingerprint so we can verify
   // whether Nuvio sends different headers for preload vs manual subtitle select.
   // Do NOT log query strings/config/API keys.
   console.log('[translate-sub headers]', JSON.stringify({
@@ -1989,10 +2010,11 @@ app.get('/translate-sub', async (req, res) => {
               }
             }
 
-            const imdbWeb = await fetchImdbWebContext(imdbId, meta.name || '');
+            const [imdbWeb, wiki] = await Promise.all([
+              fetchImdbWebContext(imdbId, meta.name || '').catch(() => ''),
+              fetchWikipediaContext(meta.name || '', meta.year || '').catch(() => '')
+            ]);
             if (imdbWeb) movieContext += `\n\n${imdbWeb}`;
-
-            const wiki = await fetchWikipediaContext(meta.name || '', meta.year || '');
             if (wiki) movieContext += `\n\n${wiki}`;
           }
         } catch (err) {
@@ -2066,6 +2088,74 @@ app.get('/translate-sub', async (req, res) => {
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
       // The limiter in callAI() enforces the hard 15 RPM/key and 45 RPM total caps.
+      // v3.9.44 CUE REPAIR: when Gemini drops only a few cues, do NOT
+      // retransate the whole 100-cue chunk. Detect the missing source cues by
+      // their original timestamps, translate only those cues, then rebuild the
+      // chunk from the original timeline. This prevents the 90s+ full-chunk
+      // repair seen in production logs for a 100 -> 99 mismatch.
+      const cueIdentity = cue => `${cue.start}|${cue.end}`;
+
+      const mergeMissingCueRepairs = async (sourceChunk, translatedText, label, orderedKeys) => {
+        const sourceCues = parseSrtCues(sourceChunk);
+        const translatedCues = parseSrtCues(translatedText || '');
+        if (!sourceCues.length || !translatedCues.length) return null;
+
+        const sourceMap = new Map(sourceCues.map(c => [cueIdentity(c), c]));
+        const translatedMap = new Map();
+        for (const cue of translatedCues) {
+          const id = cueIdentity(cue);
+          if (sourceMap.has(id) && !translatedMap.has(id) && String(cue.body || '').trim()) {
+            translatedMap.set(id, cue);
+          }
+        }
+
+        const missing = sourceCues.filter(c => !translatedMap.has(cueIdentity(c)));
+        if (!missing.length || missing.length > 5) return null;
+
+        console.warn(`🩹 [Gemini AI] ${label}: phát hiện ${missing.length} cue thiếu theo timestamp; chỉ repair cue thiếu.`);
+
+        const repaired = [];
+        for (let i = 0; i < missing.length; i++) {
+          const cue = missing[i];
+          const oneCueSrt = `1\n${srtMs(cue.start)} --> ${srtMs(cue.end)}\n${cue.body}`;
+          const repairPrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp.
+
+Dịch DUY NHẤT cue SRT sau sang tiếng Việt tự nhiên.
+- Bắt buộc trả về đúng 1 cue.
+- Giữ nguyên tuyệt đối timestamp.
+- Không bỏ cue, không gộp, không tách.
+- Chỉ dịch phần thoại.
+- Chỉ trả về SRT, không markdown, không giải thích.
+
+${contextGuide}
+
+CUE CẦN REPAIR:
+${oneCueSrt}`;
+          const result = await callAIWithModelFallback(repairPrompt, orderedKeys, selectedModel, 0);
+          if (!result?.result) throw new Error(`${label}: repair cue ${i + 1} không có kết quả`);
+          const parsed = parseSrtCues(result.result);
+          if (parsed.length !== 1) throw new Error(`${label}: repair cue ${i + 1} trả ${parsed.length} cue`);
+          const repairedCue = parsed[0];
+          if (repairedCue.start !== cue.start || repairedCue.end !== cue.end || !String(repairedCue.body || '').trim()) {
+            throw new Error(`${label}: repair cue ${i + 1} sai timestamp`);
+          }
+          translatedMap.set(cueIdentity(cue), repairedCue);
+          repaired.push(cueIdentity(cue));
+        }
+
+        const merged = sourceCues.map(c => {
+          const t = translatedMap.get(cueIdentity(c));
+          return {
+            start: c.start,
+            end: c.end,
+            body: String(t?.body || '').trim()
+          };
+        });
+        if (merged.some(c => !c.body)) return null;
+        console.log(`🩹 [Gemini AI] ${label}: repair ${repaired.length}/${missing.length} cue thành công.`);
+        return buildSrtFromCues(merged);
+      };
+
       const translateOneValidated = async (sourceChunk, label, orderedKeys, expectedCueCount) => {
         const basePrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
@@ -2105,6 +2195,12 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
           if (returned === expectedCueCount) return last.result.trim();
         }
         const returned = last?.result ? parseSrtCues(last.result).length : 0;
+        if (last?.result && returned !== expectedCueCount) {
+          const repaired = await mergeMissingCueRepairs(sourceChunk, last.result, label, orderedKeys);
+          if (repaired && parseSrtCues(repaired).length === expectedCueCount) {
+            return repaired.trim();
+          }
+        }
         throw new Error(`${label}: cue mismatch (${expectedCueCount} → ${returned})`);
       };
 
@@ -2146,12 +2242,18 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
               if (smaller.length <= 1) throw err;
               console.warn(`🛠️ [Gemini AI] Cascade ${label}: ${cueCount} cue thất bại → ${smaller.length} phần x tối đa ${nextMax} cue`);
 
-              const results = await Promise.all(smaller.map(async (subPiece, subIndex) => {
+              // Cascade pieces are deliberately processed sequentially here.
+              // The normal top-level workers already provide concurrency; spawning
+              // another Promise.all at every cascade depth can create a request storm
+              // and makes RPM/TPM limits much easier to hit.
+              const results = [];
+              for (let subIndex = 0; subIndex < smaller.length; subIndex++) {
+                const subPiece = smaller[subIndex];
                 const startKey = (primaryIndex + depth + subIndex) % Math.max(1, workerKeys.length);
                 const subKeys = workerKeys.slice(startKey).concat(workerKeys.slice(0, startKey));
                 const text = await translateCascade(subPiece, `${label}.${subIndex + 1}`, subKeys, depth + 1);
-                return { index: subIndex, text };
-              }));
+                results.push({ index: subIndex, text });
+              }
 
               results.sort((a, b) => a.index - b.index);
               const joined = results.map(x => x.text).join('\n\n');
