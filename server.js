@@ -139,7 +139,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.35',
+  version: '3.9.36',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -151,7 +151,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.35', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.36', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -270,12 +270,14 @@ function normalizeSrtForPlayback(input) {
   return buildSrtFromCues(parseSrtCues(input));
 }
 
-function rebuildTranslatedSrtFromSource(sourceSrt, translatedChunks) {
+function rebuildTranslatedSrtFromSource(sourceChunks, translatedChunks) {
   // CRITICAL v3.9.34:
   // Gemini may occasionally alter/duplicate timestamps while translating.
   // Never trust Gemini's timeline. The ORIGINAL subtitle is the sole source of
   // truth for start/end times. Each translated chunk is aligned by cue order.
-  const sourceChunks = splitSrtIntoChunks(sourceSrt, 14000);
+  // v3.9.36: use the EXACT chunk array that was sent to Gemini.
+  // Re-splitting the original SRT with a different maxChars value caused
+  // false mismatches such as source=4 chunks vs translated=7 chunks.
   const finalCues = [];
 
   const cleanBody = value => String(value || '')
@@ -939,7 +941,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   //
   // Bump this constant only when intentionally invalidating old client-side
   // subtitle URLs after a future protocol/response change.
-  const aiUrlVersion = '3.9.35';
+  const aiUrlVersion = '3.9.36';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -1504,7 +1506,7 @@ const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TRANSLATION_CACHE_MAX = 40;
 const translationInFlight = new Map();
 
-// v3.9.35: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
+// v3.9.36: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
 // previous episode and request it again when a new episode opens. Old URLs must
 // not start Gemini or return the temporary status subtitle.
 const subtitleActivation = new Map();
@@ -1566,7 +1568,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.35',
+    'v3.9.36',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -1682,6 +1684,20 @@ function writeLiveStatus(res, state, force = false) {
 
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target, gate } = req.query;
+  // v3.9.36 diagnostic: capture the client request fingerprint so we can verify
+  // whether Nuvio sends different headers for preload vs manual subtitle select.
+  // Do NOT log query strings/config/API keys.
+  console.log('[translate-sub headers]', JSON.stringify({
+    ua: req.get('user-agent') || '',
+    referer: req.get('referer') || '',
+    accept: req.get('accept') || '',
+    range: req.get('range') || '',
+    xrw: req.get('x-requested-with') || '',
+    fetchDest: req.get('sec-fetch-dest') || '',
+    fetchMode: req.get('sec-fetch-mode') || '',
+    fetchSite: req.get('sec-fetch-site') || '',
+    cacheControl: req.get('cache-control') || ''
+  }));
   // v3.9.33 MANUAL-SELECT GATE:
   // /translate-sub is intentionally a separate resource URL. The subtitle
   // discovery route only advertises this URL; it never downloads the source
@@ -2082,7 +2098,7 @@ Lần trả lời trước đã làm mất hoặc gộp cue. Lần này bắt bu
       // v3.9.34: rebuild the final subtitle timeline from ORIGINAL SRT cues.
       // This prevents Gemini timestamp drift/duplication from causing subtitle
       // overlap, double-rendering, and seek artifacts on Android TV/Media3.
-      const finalSrt = rebuildTranslatedSrtFromSource(originalSrt, translated);
+      const finalSrt = rebuildTranslatedSrtFromSource(chunks, translated);
       const finalNormalizedSrt = normalizeSrtForPlayback(finalSrt);
       if (!finalNormalizedSrt) throw new Error('Bản dịch cuối rỗng sau khi chuẩn hóa SRT.');
       console.log(`📤 [Gemini AI] Đã ghép SRT theo timestamp gốc và lưu cache | ${finalNormalizedSrt.length.toLocaleString()} ký tự`);
@@ -2133,7 +2149,7 @@ Lần trả lời trước đã làm mất hoặc gộp cue. Lần này bắt bu
       `🟡 Gemini AI đang dịch phụ đề...\n` +
       `📦 Đang xử lý ngầm bằng ${selectedModel}\n` +
       `🔄 Khi dịch xong, bấm Reload phụ đề để nhận bản Việt.`;
-    return res.send(makeStatusSrt(statusMessage, 5));
+    return res.send(makeStatusSrt(statusMessage, 3600));
   } catch (err) {
     console.error('[translate-sub setup]', err.stack || err.message || err);
     return res.send(
