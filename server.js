@@ -1,3 +1,4 @@
+// NothingP AIOsubtitles v3.9.57 — Character Guide + 20K/150 + unlimited parallel per-key + 15 RPM/key
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -78,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.48</h2>
+<h2>NothingP AIOsubtitles v3.9.57</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -139,7 +140,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.48',
+  version: '3.9.56',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -151,7 +152,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.48', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.56', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -460,8 +461,8 @@ async function fetchSubsourceSubtitleText(subtitleId, apiKey) {
   return extractSubtitleText(Buffer.from(response.data));
 }
 
-function splitSrtIntoChunks(srt, maxChars = 10000, maxCues = 100) {
-  // v3.9.48: keep the fast 10k target AND cap cue density at 100 cues.
+function splitSrtIntoChunks(srt, maxChars = 16000, maxCues = 150) {
+  // v3.9.48: larger chunks reduce Gemini calls while preserving a hard cue cap.
   // Never split an individual SRT cue block.
   const blocks = srt.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
   const chunks = [];
@@ -514,20 +515,18 @@ function cleanAndRebuildSrt(srtText) {
   return normalizeSrtForPlayback(srtText);
 }
 
-// Each API key belongs to its own Google Cloud project. Keep a separate
-// request-start limiter per key so 3 independent projects can work in parallel.
-// Requests on the same key are serialized to avoid bursts across simultaneous
-// subtitle jobs.
-const GEMINI_MIN_INTERVAL_MS = 4000;
+// Each API key has an independent rolling 15-request/60-second budget.
+// IMPORTANT: this is a REQUEST-START limiter only. It does NOT serialize HTTP
+// calls and it does NOT cap in-flight/concurrent requests on the same key.
+// A key may start up to 15 requests as fast as possible; after that, only the
+// next start on that key waits for the oldest start to leave the rolling window.
 const GEMINI_MAX_REQUESTS_PER_MINUTE = 15;
-const GEMINI_MAX_TOTAL_REQUESTS_PER_MINUTE = 45;
 const GEMINI_WINDOW_MS = 60000;
 const geminiKeyState = new Map();
-const geminiGlobalState = { starts: [], queue: Promise.resolve() };
 
 function getGeminiKeyState(key) {
   if (!geminiKeyState.has(key)) {
-    geminiKeyState.set(key, { starts: [], lastRequestAt: 0, queue: Promise.resolve() });
+    geminiKeyState.set(key, { starts: [] });
   }
   return geminiKeyState.get(key);
 }
@@ -536,57 +535,27 @@ function pruneRequestStarts(starts, now = Date.now()) {
   while (starts.length && now - starts[0] >= GEMINI_WINDOW_MS) starts.shift();
 }
 
-async function waitForRequestQuota(state, maxRequests) {
+// Reserve the request-start slot BEFORE the network call. There is deliberately
+// no await between the quota check and starts.push(), so two callers cannot both
+// observe the same free slot in Node's single-threaded event loop.
+async function reserveGeminiRequestSlot(key) {
+  const state = getGeminiKeyState(key);
   while (true) {
     const now = Date.now();
     pruneRequestStarts(state.starts, now);
-    const intervalWait = state.lastRequestAt
-      ? Math.max(0, GEMINI_MIN_INTERVAL_MS - (now - state.lastRequestAt))
-      : 0;
-    if (state.starts.length < maxRequests && intervalWait <= 0) return;
-
-    let waitMs = intervalWait;
-    if (state.starts.length >= maxRequests) {
-      waitMs = Math.max(waitMs, GEMINI_WINDOW_MS - (now - state.starts[0]) + 25);
+    if (state.starts.length < GEMINI_MAX_REQUESTS_PER_MINUTE) {
+      state.starts.push(now);
+      return;
     }
+    const waitMs = GEMINI_WINDOW_MS - (now - state.starts[0]) + 25;
     await new Promise(r => setTimeout(r, Math.max(25, waitMs)));
   }
 }
 
 async function withGeminiKeySlot(key, fn) {
-  const state = getGeminiKeyState(key);
-  let release;
-  const next = new Promise(resolve => { release = resolve; });
-  const previous = state.queue;
-  state.queue = previous.then(() => next);
-
-  await previous;
-  try {
-    // Per-key hard cap: never start more than 15 requests in any rolling 60s
-    // window, and never start two requests on the same key less than 4s apart.
-    await waitForRequestQuota(state, GEMINI_MAX_REQUESTS_PER_MINUTE);
-
-    // Global hard cap: across all 3 keys, never start more than 45 requests
-    // in any rolling 60s window. The global queue serializes quota reservation,
-    // while the actual Gemini HTTP calls remain parallel across different keys.
-    let globalRelease;
-    const globalNext = new Promise(resolve => { globalRelease = resolve; });
-    const globalPrevious = geminiGlobalState.queue;
-    geminiGlobalState.queue = globalPrevious.then(() => globalNext);
-    await globalPrevious;
-    try {
-      await waitForRequestQuota(geminiGlobalState, GEMINI_MAX_TOTAL_REQUESTS_PER_MINUTE);
-      const startedAt = Date.now();
-      state.lastRequestAt = startedAt;
-      state.starts.push(startedAt);
-      geminiGlobalState.starts.push(startedAt);
-      return await fn();
-    } finally {
-      globalRelease();
-    }
-  } finally {
-    release();
-  }
+  await reserveGeminiRequestSlot(key);
+  // No per-key queue, no fixed delay and no in-flight concurrency cap.
+  return await fn();
 }
 
 async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
@@ -628,7 +597,7 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           .trim();
 
         if (result) {
-          const actualKeyIndex = (start + keyIndex) % keys.length;
+          const actualKeyIndex = keyIndex;
           console.log(`[Gemini ${selectedModel} / key #${actualKeyIndex + 1}] success`);
           return { result, error: null, model: selectedModel, keyIndex: actualKeyIndex };
         }
@@ -643,7 +612,7 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           `Gemini ${selectedModel}: lỗi không xác định`;
 
         lastError = message;
-        const actualKeyIndex = (start + keyIndex) % keys.length;
+        const actualKeyIndex = keyIndex;
         console.error(`[Gemini ${selectedModel} / key #${actualKeyIndex + 1}]`, message);
 
         if (
@@ -919,56 +888,140 @@ async function fetchWikipediaContext(title, year = '') {
   }
 }
 
-async function buildCharacterRelationshipGuide({ movieContext, subtitleSample, geminiKeys, model }) {
-  if (!Array.isArray(geminiKeys) || !geminiKeys.length) return '';
+async function buildCharacterRelationshipGuide({
+  movieContext,
+  subtitleSample,
+  geminiKeys,
+  model
+}) {
+  // v3.9.57: six-layer Character/Relationship Guide.
+  // The guide is intentionally compact and is generated once per episode/job,
+  // then reused by every translation chunk.
+  const prompt = `Bạn là chuyên gia bản địa hóa phụ đề phim Việt Nam và phân tích nhân vật, quan hệ, xưng hô.
 
-  const prompt = `
-Bạn là chuyên gia bản địa hóa phụ đề Việt Nam. Hãy tạo một "GUIDE NGỮ CẢNH" cực ngắn cho CHÍNH phim/tập đang dịch.
-Mục tiêu: giúp AI dịch nhất quán tên, quan hệ, xưng hô, giọng nhân vật và thuật ngữ. Chỉ giữ thông tin thực sự hữu ích; KHÔNG viết tiểu sử dài.
+NHIỆM VỤ:
+Trước khi dịch phụ đề, hãy xây dựng "Character & Relationship Guide" riêng cho CHÍNH TẬP PHIM này.
+Guide bắt buộc có ĐÚNG 6 LỚP sau:
 
-BẮT BUỘC đủ 6 lớp sau:
-1) NHÂN VẬT: tên chính | bí danh/biệt danh/chức danh | xuất hiện hay chỉ được nhắc | vai trò | giới tính chỉ khi có bằng chứng.
-2) QUAN HỆ: quan hệ HAI CHIỀU A→B và B→A; trạng thái hiện tại (bạn, yêu, vợ/chồng, cha-con, cấp trên-cấp dưới, thầy-trò, đối thủ, người lạ...).
-3) XƯNG HÔ: chỉ ghi cặp xưng hô hữu ích theo tình huống: bình thường, thân mật, căng thẳng/tức giận, công khai, trang trọng. Không ép một cặp cho mọi cảnh.
-4) THAY ĐỔI QUAN HỆ: chỉ ghi khi quan hệ thực sự đổi; nêu sự kiện/thời điểm ngắn và ảnh hưởng xưng hô.
-5) GIỌNG NHÂN VẬT: 2-5 từ khóa ngắn về cách nói (lạnh, cộc, mỉa mai, kính trọng, thân thiện...).
-6) THUẬT NGỮ: các tên/chức danh/tổ chức/địa danh/vật phẩm/phe phái quan trọng cần dịch thống nhất.
+LỚP 1 — NHÂN VẬT
+- Chỉ ghi nhân vật thực sự xuất hiện hoặc được nhắc đến trong câu chuyện.
+- Tên, bí danh/cách gọi, giới tính chỉ khi có bằng chứng trong nội dung/thoại.
+- Có thể ghi vai trò/chức vụ khi có căn cứ.
 
-QUY TẮC:
-- Chỉ dùng bằng chứng từ nội dung phim/tập, tóm tắt và mẫu thoại. Không dùng cast/diễn viên để suy ra giới tính hay quan hệ.
-- Không bịa tuổi, giới tính, quan hệ hoặc vai vế. Thiếu bằng chứng thì dùng "chưa xác định" hoặc bỏ mục.
-- Ưu tiên quan hệ và xưng hô hiện tại tại thời điểm lời thoại.
-- Evidence cực ngắn, tối đa khoảng 120 ký tự cho mỗi mục quan trọng.
-- Chỉ giữ nhân vật/quan hệ/thuật ngữ có ảnh hưởng đến bản dịch.
-- Guide phải trực quan, cô đọng, JSON hợp lệ, mục tiêu <= 4.000 ký tự. Không giải thích ngoài JSON.
+LỚP 2 — QUAN HỆ
+- Phân tích các cặp nhân vật quan trọng: cha-con, mẹ-con, vợ-chồng, người yêu, anh-em, bạn bè, cấp trên-cấp dưới, thầy-trò, đối thủ, người lạ...
+- Ghi trạng thái quan hệ hiện tại trong tập và hướng quan hệ A→B / B→A.
 
-JSON FORMAT:
+LỚP 3 — XƯNG HÔ
+- Xác định cách xưng/gọi bằng tiếng Việt theo quan hệ và bối cảnh.
+- Có thể tách các tình huống bình thường, thân mật, tức giận, công khai, trang trọng.
+- Nếu chưa đủ bằng chứng thì ghi "chưa xác định".
+
+LỚP 4 — THAY ĐỔI QUAN HỆ
+- Ghi những thay đổi quan hệ/xưng hô xảy ra trong chính tập phim.
+- Nêu sự kiện làm thay đổi, quan hệ từ → đến và ảnh hưởng tới xưng hô.
+- Nếu không có thay đổi rõ ràng thì trả mảng rỗng.
+
+LỚP 5 — GIỌNG NHÂN VẬT
+- Mô tả ngắn phong cách nói của từng nhân vật khi có căn cứ: lạnh lùng, cộc, lịch sự, thân mật, trang trọng, hài hước, đe dọa, trẻ con...
+- Không suy đoán chỉ từ diễn viên hoặc giới tính.
+
+LỚP 6 — THUẬT NGỮ
+- Ghi các tên riêng, chức danh, biệt danh, thuật ngữ chuyên môn/bối cảnh và cách dịch tiếng Việt nên thống nhất.
+- Chỉ thêm thuật ngữ có căn cứ từ nội dung phim/thoại.
+
+QUY TẮC RẤT QUAN TRỌNG:
+- CHỈ dùng nội dung phim, tóm tắt/cốt truyện và mẫu phụ đề của CHÍNH TẬP để phân tích.
+- KHÔNG lấy hoặc suy luận thông tin từ danh sách diễn viên, tên người đóng vai, đạo diễn, biên kịch, nhà sản xuất hay ê-kíp.
+- Nếu nguồn có phần cast/credits thì BỎ QUA hoàn toàn; tên diễn viên không phải tên nhân vật.
+- Không tự bịa tuổi, giới tính, quan hệ, vai vế, quyền lực, tình cảm hoặc tình tiết.
+- Khi không đủ bằng chứng, dùng "chưa xác định" hoặc confidence thấp thay vì đoán.
+- Ưu tiên bằng chứng trực tiếp từ thoại và tóm tắt/cốt truyện của CHÍNH TẬP.
+- Ưu tiên trạng thái quan hệ tại thời điểm lời thoại được nói.
+- Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, bản dịch phải ưu tiên bằng chứng mới và giữ nhất quán về sau.
+- Nếu có mâu thuẫn giữa metadata và phụ đề, ưu tiên bằng chứng nội dung rõ ràng hơn và giảm confidence khi cần.
+- Với cổ trang/fantasy/quân đội/học đường/công sở/tội phạm..., điều chỉnh xưng hô và thuật ngữ theo bối cảnh thực tế của phim.
+- Guide phải ngắn gọn để có thể đưa vào mọi chunk dịch; evidence chỉ là căn cứ ngắn, không kể lại cốt truyện.
+- Kết quả phải là JSON hợp lệ, không markdown, không giải thích ngoài JSON.
+
+ĐỊNH DẠNG JSON BẮT BUỘC — ĐÚNG 6 LỚP:
 {
-  "characters":[{"name":"","aliases":[],"presence":"appears|mentioned","gender":"male|female|unknown","role":"","voice":"","confidence":"high|medium|low","e":""}],
-  "relationships":[{"a":"","b":"","relation":"","status":"","a_to_b":"","b_to_a":"","pronouns":{"normal":"","intimate":"","angry":"","public":"","formal":""},"confidence":"high|medium|low","e":""}],
-  "changes":[{"a":"","b":"","event":"","from":"","to":"","pronoun_effect":"","e":""}],
-  "terms":[{"source":"","target":"","type":"","e":""}],
-  "global_pronouns":""
+  "characters": [
+    {
+      "name": "",
+      "aliases": [],
+      "presence": "appears|mentioned",
+      "gender": "male|female|unknown",
+      "role": "",
+      "voice": "",
+      "confidence": "high|medium|low",
+      "e": ""
+    }
+  ],
+  "relationships": [
+    {
+      "a": "",
+      "b": "",
+      "relation": "",
+      "status": "",
+      "a_to_b": "",
+      "b_to_a": "",
+      "pronouns": {
+        "normal": "",
+        "intimate": "",
+        "angry": "",
+        "public": "",
+        "formal": ""
+      },
+      "confidence": "high|medium|low",
+      "e": ""
+    }
+  ],
+  "changes": [
+    {
+      "a": "",
+      "b": "",
+      "event": "",
+      "from": "",
+      "to": "",
+      "pronoun_effect": "",
+      "e": ""
+    }
+  ],
+  "terms": [
+    {
+      "source": "",
+      "target": "",
+      "type": "",
+      "e": ""
+    }
+  ],
+  "global_pronouns": ""
 }
 
-THÔNG TIN PHIM/TẬP:
-${String(movieContext || '').slice(0, 9000)}
+YÊU CẦU CHẤT LƯỢNG:
+- characters = Lớp 1 + voice là dữ liệu cho Lớp 5.
+- relationships + pronouns = Lớp 2 + Lớp 3.
+- changes = Lớp 4.
+- terms = Lớp 6.
+- Không bỏ qua changes/terms chỉ vì khó xác định; nếu không có bằng chứng thì dùng [] và "" tương ứng.
+- Mỗi mục quan trọng nên có evidence/e ngắn gọn, tối đa khoảng 120 ký tự.
+- Giữ tổng guide gọn, mục tiêu khoảng ≤4.000 ký tự.
 
-MẪU THOẠI:
-${String(subtitleSample || '').slice(0, 5000)}
-`;
+THÔNG TIN PHIM:
+${movieContext}
 
-  try {
-    const key = geminiKeys[0];
-    const response = await callAI(prompt, geminiKeys, model, 0);
-    const text = String(response?.result || '').trim();
-    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    const parsed = JSON.parse(cleaned);
-    return JSON.stringify(parsed);
-  } catch (err) {
-    console.warn('[Character Guide] compact guide generation failed:', err.message);
-    return '';
-  }
+MẪU PHỤ ĐỀ GỐC:
+${subtitleSample}`;
+
+  const guideRes = await callAI(prompt, geminiKeys, model);
+  if (!guideRes.result) return '';
+
+  return parseRelationshipGuide(guideRes.result);
+}
+
+function itemIdSafe(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(-80) || Math.random().toString(36).slice(2);
 }
 
 async function handleSubtitles(req, res, encodedConfig) {
@@ -1625,7 +1678,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.48',
+    'v3.9.57',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -2041,7 +2094,7 @@ app.get('/translate-sub', async (req, res) => {
   Thông tin phim từ Cinemeta/IMDb/Wikipedia:
   ${movieContext}
 
-  Bảng phân tích nhân vật, bối cảnh, quan hệ và xưng hô (do AI xây dựng từ dữ liệu ở trên):
+  Character/Relationship Guide 6 lớp (do AI xây dựng từ dữ liệu ở trên):
   ${relationshipGuide || 'Chưa có bảng phân tích; chỉ sử dụng thông tin phim và mẫu thoại làm bằng chứng.'}
 
   Mẫu thoại tham chiếu:
@@ -2049,25 +2102,30 @@ app.get('/translate-sub', async (req, res) => {
 
   QUY TẮC SỬ DỤNG BẢNG:
   - Bảng là ngữ cảnh tham chiếu, không phải nội dung cần dịch.
-  - Ưu tiên quan hệ/xưng hô có confidence cao; với medium/low chỉ dùng khi không có bằng chứng mâu thuẫn rõ ràng.
+  - Ưu tiên quan hệ/xưng hô/thuật ngữ có confidence cao; với medium/low chỉ dùng khi không có bằng chứng mâu thuẫn rõ ràng.
+  - Guide gồm 6 lớp: Nhân vật, Quan hệ, Xưng hô, Thay đổi quan hệ, Giọng nhân vật, Thuật ngữ.
+  - Khi quan hệ thay đổi trong tập, ưu tiên trạng thái mới và áp dụng hiệu ứng xưng hô từ lớp Thay đổi quan hệ.
   - Không tự bịa quan hệ, tuổi, vai vế hoặc bối cảnh chưa được nguồn/bằng chứng hỗ trợ.
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
   - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
-      const chunks = splitSrtIntoChunks(originalSrt, 12000, 100);
+      const chunks = splitSrtIntoChunks(originalSrt, 20000, 150);
       const translated = [];
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
-      const workerCount = Math.max(1, Math.min(3, geminiKeys.length));
-      // v3.9.48: keep the fast 10k/100-cue chunks with hard 15 RPM/key and 45 RPM total quotas.
+      const baseWorkerKeysForLog = geminiKeys.slice(0, 3);
+      const maxWorkerCountForLog = chunks.length;
+      // v3.9.57: keep 20k/150-cue chunks. All chunks may run concurrently and
+      // may share the same key; the ONLY Gemini scheduler limit is 15 request
+      // starts per rolling 60 seconds for each individual key.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
-      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk <=12k / <=100 cue | key interval 4s | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
+      console.log(`📦 [Gemini AI] Đang sử dụng cơ chế đa luồng dịch phụ đề | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
 
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
-      // The limiter in callAI() enforces the hard 15 RPM/key and 45 RPM total caps.
+      // The limiter in callAI() enforces the hard 15 request-starts/60s/key cap.
       // v3.9.48 CUE REPAIR: when Gemini drops only a few cues, do NOT
       // retransate the whole 100-cue chunk. Detect the missing source cues by
       // their original timestamps, translate only those cues, then rebuild the
@@ -2172,11 +2230,33 @@ ${oneCueSrt}`;
         return { ok: true, sourceCues, translatedCues };
       };
 
-      const translateOneValidated = async (sourceChunk, label, orderedKeys, expectedCueCount) => {
+      // v3.9.48/49: overlap context — carry the tail of the PREVIOUS source chunk
+      // into the next chunk prompt so dialogue/relationship context is not cut at
+      // the chunk boundary. This is context only; Gemini must NOT translate it.
+      // Keep the overlap small to improve continuity without materially increasing
+      // prompt size or Gemini latency.
+      const OVERLAP_CONTEXT_CUES = 12;
+      const getOverlapContext = (chunkIndex) => {
+        if (chunkIndex <= 0) return '';
+        const previousChunk = chunks[chunkIndex - 1];
+        if (!previousChunk) return '';
+        const previousCues = parseSrtCues(previousChunk);
+        if (!previousCues.length) return '';
+        const tail = previousCues.slice(-OVERLAP_CONTEXT_CUES);
+        return buildSrtFromCues(tail);
+      };
+
+      const buildOverlapPrompt = (chunkIndex) => {
+        const overlap = getOverlapContext(chunkIndex);
+        if (!overlap) return '';
+        return `\n\n[NGỮ CẢNH GỐI ĐẦU — CHUNK TRƯỚC]\nĐây là ${Math.min(OVERLAP_CONTEXT_CUES, parseSrtCues(chunks[chunkIndex - 1] || '').length)} cue cuối của chunk ngay trước. Chỉ dùng để hiểu mạch hội thoại, nhân vật, quan hệ và cách xưng hô. KHÔNG dịch lại, KHÔNG đưa các cue này vào kết quả.\n${overlap}\n[HẾT NGỮ CẢNH GỐI ĐẦU]`;
+      };
+
+      const translateOneValidated = async (sourceChunk, label, orderedKeys, expectedCueCount, chunkIndex = -1) => {
         const basePrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
 MỤC TIÊU:
-Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${contextGuide}
+Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${contextGuide}${chunkIndex >= 0 ? buildOverlapPrompt(chunkIndex) : ''}
 
 NGUYÊN TẮC XƯNG HÔ:
 - Ưu tiên tuyệt đối thông tin nhân vật/quan hệ có bằng chứng trong phần ngữ cảnh ở trên.
@@ -2221,17 +2301,17 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
         throw new Error(`${label}: cue mismatch (${expectedCueCount} → ${returned})`);
       };
 
-      const translateChunk = async (i, workerKey) => {
+      const translateChunk = async (i, workerKey, workerIndex = 0) => {
         const startedAt = Date.now();
         const sourceChunk = chunks[i];
         const expectedCueCount = parseSrtCues(sourceChunk).length;
-        const primaryIndex = Math.max(0, workerKeys.indexOf(workerKey));
-        const orderedKeys = workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex));
+        const primaryIndex = Math.max(0, Math.min(baseWorkerKeys.length - 1, Number(workerIndex) || 0));
+        const orderedKeys = baseWorkerKeys.slice(primaryIndex).concat(baseWorkerKeys.slice(0, primaryIndex));
         const keyHint = `${String(workerKey).slice(0, 4)}…${String(workerKey).slice(-4)}`;
-        console.log(`⏳ [Gemini AI] Đang dịch chunk ${i + 1}/${chunks.length} | ${expectedCueCount} cue | worker-key=${primaryIndex + 1} | key=${keyHint}`);
+        console.log(`⏳ [Gemini AI] Đang dịch chunk ${i + 1}/${chunks.length} | ${expectedCueCount} cue | task-key-index=${primaryIndex + 1}/${baseWorkerKeys.length} | key #${primaryIndex + 1} | key=${keyHint}`);
 
         try {
-          const result = await translateOneValidated(sourceChunk, `chunk ${i + 1}/${chunks.length}`, orderedKeys, expectedCueCount);
+          const result = await translateOneValidated(sourceChunk, `chunk ${i + 1}/${chunks.length}`, orderedKeys, expectedCueCount, i);
           translated.push({ index: i, text: result });
           statusState.done = translated.length;
           console.log(`✅ [Gemini AI] Xong chunk ${i + 1}/${chunks.length} | ${((Date.now() - startedAt) / 1000).toFixed(1)}s | ${expectedCueCount} cue`);
@@ -2242,10 +2322,10 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
           // one or two cues. Retry only the problematic piece, then recursively
           // reduce the cue size. This keeps the normal path fast while making
           // pathological cue-dense sections progressively easier for Gemini.
-          const translateCascade = async (piece, label, keys, depth = 0) => {
+          const translateCascade = async (piece, label, keys, depth = 0, chunkIndex = -1) => {
             const cueCount = parseSrtCues(piece).length;
             try {
-              return await translateOneValidated(piece, label, keys, cueCount);
+              return await translateOneValidated(piece, label, keys, cueCount, chunkIndex);
             } catch (err) {
               if (cueCount <= 1) throw err;
 
@@ -2267,9 +2347,12 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
               const results = [];
               for (let subIndex = 0; subIndex < smaller.length; subIndex++) {
                 const subPiece = smaller[subIndex];
-                const startKey = (primaryIndex + depth + subIndex) % Math.max(1, workerKeys.length);
-                const subKeys = workerKeys.slice(startKey).concat(workerKeys.slice(0, startKey));
-                const text = await translateCascade(subPiece, `${label}.${subIndex + 1}`, subKeys, depth + 1);
+                // Rotate only within the key list passed to this cascade level.
+                // Do not reference translateChunk-local variables here: the
+                // cascade is intentionally self-contained and recursive.
+                const startKey = (depth + subIndex) % Math.max(1, keys.length);
+                const subKeys = keys.slice(startKey).concat(keys.slice(0, startKey));
+                const text = await translateCascade(subPiece, `${label}.${subIndex + 1}`, subKeys, depth + 1, chunkIndex);
                 results.push({ index: subIndex, text });
               }
 
@@ -2283,7 +2366,7 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
             }
           };
 
-          const repairedText = await translateCascade(sourceChunk, `repair ${i + 1}`, workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex)));
+          const repairedText = await translateCascade(sourceChunk, `repair ${i + 1}`, baseWorkerKeys.slice(primaryIndex).concat(baseWorkerKeys.slice(0, primaryIndex)), 0, i);
           const repairedCueCount = parseSrtCues(repairedText).length;
           if (repairedCueCount !== expectedCueCount) {
             throw new Error(`Chunk ${i + 1}: repair cascade cue mismatch (${expectedCueCount} → ${repairedCueCount})`);
@@ -2294,22 +2377,22 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
         }
       };
 
-      // One worker per independent Google project/key.
-      // With 3 keys: worker #1 -> chunks 0,3,6...; #2 -> 1,4,7...;
-      // #3 -> 2,5,8... . Each key has its own limiter and queue.
-      const workerKeys = geminiKeys.slice(0, 3);
-      // v3.9.48: dynamic work-stealing. A fast key immediately takes the next
-      // chunk instead of waiting for a slower fixed-assignment worker. This keeps
-      // all independent projects busy without increasing per-key RPM/queue limits.
-      let nextChunkIndex = 0;
-      const worker = async (workerIndex, workerKey) => {
-        while (true) {
-          const i = nextChunkIndex++;
-          if (i >= chunks.length) return;
-          await translateChunk(i, workerKey);
-        }
-      };
-      await Promise.all(workerKeys.map((key, index) => worker(index, key)));
+      const baseWorkerKeys = geminiKeys.slice(0, 3);
+      const activeWorkerCount = chunks.length;
+
+      console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} chunk task | ${baseWorkerKeys.length} key | không giới hạn request đồng thời/key | hard cap 15 request starts/60s/key`);
+
+      // v3.9.57: launch every chunk task immediately. Keys are assigned
+      // round-robin so the first 3 chunks use key 1/2/3, and later chunks may
+      // reuse those keys concurrently. There is NO worker-per-key cap.
+      // reserveGeminiRequestSlot() is the only gate and limits request STARTS
+      // to 15 per rolling 60 seconds for each key independently.
+      const chunkTasks = chunks.map((_, i) => {
+        const keyIndex = i % Math.max(1, baseWorkerKeys.length);
+        const workerKey = baseWorkerKeys[keyIndex];
+        return translateChunk(i, workerKey, keyIndex);
+      });
+      await Promise.all(chunkTasks);
 
       console.log(`🎉 [Gemini AI] Dịch hoàn tất ${translated.length}/${chunks.length} chunk. Đang ghép SRT...`);
 
@@ -2372,7 +2455,7 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
     const statusMessage =
       `🟡 Gemini AI đang dịch phụ đề...\n` +
       `⏱️ Dự kiến ${mediaLabel}: khoảng ${expectedTime}\n` +
-      `⚡ Đã tối ưu 3 luồng Gemini song song\n` +
+      `⚡ Đang sử dụng cơ chế đa luồng dịch phụ đề\n` +
       `🔄 Khi dịch xong, bấm Reload phụ đề để nhận bản Việt.`;
     return res.send(makeStatusSrt(statusMessage, 3600));
   } catch (err) {
