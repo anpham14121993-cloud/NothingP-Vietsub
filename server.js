@@ -1,4 +1,4 @@
-// NothingP AIOsubtitles v3.9.58 — Compact 7-Layer Guide + 20K/150 + unlimited parallel per-key + 15 RPM/key
+// NothingP AIOsubtitles v3.9.59 — Compact 7-Layer Guide + 20K/150 + unlimited parallel per-key + 15 RPM/key
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -79,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.58</h2>
+<h2>NothingP AIOsubtitles v3.9.59</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -894,7 +894,7 @@ async function buildCharacterRelationshipGuide({
   geminiKeys,
   model
 }) {
-  // v3.9.58: compact seven-layer Character/Relationship Guide.
+  // v3.9.59: compact seven-layer Character/Relationship Guide.
   // Generated once per episode/job, then reused by every translation chunk.
   const prompt = `Bạn là chuyên gia bản địa hóa phụ đề phim Việt Nam.
 
@@ -1598,7 +1598,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.58',
+    'v3.9.59',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -2036,7 +2036,7 @@ app.get('/translate-sub', async (req, res) => {
       // Never write to res from the background task.
       const baseWorkerKeysForLog = geminiKeys.slice(0, 3);
       const maxWorkerCountForLog = chunks.length;
-      // v3.9.58: keep 20k/150-cue chunks. All chunks may run concurrently and
+      // v3.9.59: keep 20k/150-cue chunks. All chunks may run concurrently and
       // may share the same key; the ONLY Gemini scheduler limit is 15 request
       // starts per rolling 60 seconds for each individual key.
       // The visible status message uses the requested simple movie/series estimate.
@@ -2052,7 +2052,7 @@ app.get('/translate-sub', async (req, res) => {
       // retranslations or recursive cascade are used on the repair path.
       const cueIdentity = cue => `${cue.start}|${cue.end}`;
 
-      // v3.9.58: repair ONLY the exact cues that failed validation.
+      // v3.9.59: repair ONLY the exact cues that failed validation.
       // Successful cues from the original Gemini response are never retransated.
       const getCueRepairTargets = (sourceCues, translatedCues) => {
         const targets = [];
@@ -2095,39 +2095,66 @@ app.get('/translate-sub', async (req, res) => {
         });
       };
 
+      const extractRepairText = value => {
+        let text = String(value || '')
+          .replace(/^\uFEFF/, '')
+          .replace(/```(?:srt|subtitle|text)?/gi, '')
+          .replace(/```/g, '')
+          .trim();
+
+        // Gemini may still return an SRT cue despite being asked for text only.
+        // Accept that format as a fallback, but never trust its timestamp/number.
+        const parsed = parseSrtCues(text);
+        if (parsed.length === 1 && String(parsed[0].body || '').trim()) {
+          return String(parsed[0].body).trim();
+        }
+
+        // Remove common answer labels/quotes without trying to rewrite the text.
+        text = text
+          .replace(/^\s*(?:bản\s*dịch|dịch|translation|answer|output)\s*:\s*/i, '')
+          .trim();
+        if ((text.startsWith('"') && text.endsWith('"')) ||
+            (text.startsWith('“') && text.endsWith('”'))) {
+          text = text.slice(1, -1).trim();
+        }
+        return text;
+      };
+
       const repairSingleCue = async (cue, label, orderedKeys, chunkIndex = -1) => {
-        const oneCueSrt = `1\n${srtMs(cue.start)} --> ${srtMs(cue.end)}\n${cue.body}`;
         const repairPrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp.
 
-Dịch DUY NHẤT 1 cue sau sang tiếng Việt tự nhiên.
-- Chỉ sửa/dịch đúng cue này; KHÔNG dịch lại bất kỳ cue nào khác.
-- Giữ nguyên tuyệt đối timestamp.
-- Trả về đúng 1 cue SRT.
-- Chỉ trả về SRT, không markdown, không giải thích.
+Dịch DUY NHẤT phần thoại của cue dưới đây sang tiếng Việt tự nhiên.
+- Chỉ dịch đúng cue này; KHÔNG dịch bất kỳ cue nào khác.
+- Giữ nguyên đầy đủ ý nghĩa, sắc thái, tên riêng, thuật ngữ và cách xưng hô theo ngữ cảnh.
+- KHÔNG trả về số thứ tự.
+- KHÔNG trả về timestamp.
+- KHÔNG trả về định dạng SRT.
+- KHÔNG thêm markdown, giải thích, nhận xét hay nhãn "Bản dịch:".
+- CHỈ trả về phần văn bản tiếng Việt đã dịch.
 ${contextGuide}${chunkIndex >= 0 ? buildOverlapPrompt(chunkIndex) : ''}
 
-CUE CẦN SỬA:
-${oneCueSrt}`;
+CUE CẦN REPAIR:
+${cue.body}`;
 
-        let lastError = null;
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          const result = await callAIWithModelFallback(repairPrompt, orderedKeys, selectedModel, 0);
-          if (!result?.result) {
-            lastError = new Error(`${label}: không có kết quả`);
-            continue;
-          }
-          const parsed = parseSrtCues(result.result);
-          if (
-            parsed.length === 1 &&
-            parsed[0].start === cue.start &&
-            parsed[0].end === cue.end &&
-            String(parsed[0].body || '').trim()
-          ) {
-            return parsed[0];
-          }
-          lastError = new Error(`${label}: kết quả repair không hợp lệ`);
+        const result = await callAIWithModelFallback(repairPrompt, orderedKeys, selectedModel, 0);
+        if (!result?.result) {
+          throw new Error(`${label}: không có kết quả`);
         }
-        throw lastError || new Error(`${label}: repair thất bại`);
+
+        const repairedText = extractRepairText(result.result);
+        if (!repairedText) {
+          throw new Error(`${label}: kết quả repair rỗng`);
+        }
+
+        // The Worker, not Gemini, owns the cue identity/timeline.
+        // Rebuild the repaired cue from the ORIGINAL number/timestamps.
+        const repairedCue = {
+          start: cue.start,
+          end: cue.end,
+          body: repairedText
+        };
+        console.log(`🩹 [Gemini AI] ${label}: repair text-only OK | timestamp=${srtMs(cue.start)} --> ${srtMs(cue.end)}`);
+        return repairedCue;
       };
 
       const mergeFailedCueRepairs = async (sourceChunk, translatedText, label, orderedKeys, chunkIndex = -1) => {
@@ -2290,7 +2317,7 @@ ${sourceChunk}`;
 
       console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} chunk task | ${baseWorkerKeys.length} key | không giới hạn request đồng thời/key | hard cap 15 request starts/60s/key`);
 
-      // v3.9.58: launch every chunk task immediately. Keys are assigned
+      // v3.9.59: launch every chunk task immediately. Keys are assigned
       // round-robin so the first 3 chunks use key 1/2/3, and later chunks may
       // reuse those keys concurrently. There is NO worker-per-key cap.
       // reserveGeminiRequestSlot() is the only gate and limits request STARTS
