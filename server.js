@@ -139,7 +139,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.40',
+  version: '3.9.38',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -151,7 +151,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.40', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.38', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -457,8 +457,8 @@ async function fetchSubsourceSubtitleText(subtitleId, apiKey) {
   return extractSubtitleText(Buffer.from(response.data));
 }
 
-function splitSrtIntoChunks(srt, maxChars = 10000) {
-  // v3.9.40 speed optimization: use larger chunks so each subtitle needs fewer
+function splitSrtIntoChunks(srt, maxChars = 14000) {
+  // v3.9.38 speed optimization: use larger chunks so each subtitle needs fewer
   // Gemini request cycles. Never split a subtitle block in the middle.
   // With the existing 3-key / 8s-per-key limiter, fewer requests is much
   // more important for Stremio/Nuvio latency than making tiny chunks.
@@ -683,7 +683,7 @@ function stripMarkdownCodeFence(value) {
     .trim();
 }
 
-function buildSubtitleContextSample(srt, maxChars = 10000) {
+function buildSubtitleContextSample(srt, maxChars = 14000) {
   const text = String(srt || '').replace(/\r/g, '').trim();
   if (!text) return '';
 
@@ -840,7 +840,7 @@ async function fetchWikipediaContext(title, year = '') {
       .trim();
 
     if (!html) return '';
-    return `Wikipedia (English): ${pageTitle}\n${html.slice(0, 10000)}`;
+    return `Wikipedia (English): ${pageTitle}\n${html.slice(0, 14000)}`;
   } catch (err) {
     console.warn('[Wikipedia context]', err.message);
     return '';
@@ -941,7 +941,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   //
   // Bump this constant only when intentionally invalidating old client-side
   // subtitle URLs after a future protocol/response change.
-  const aiUrlVersion = '3.9.40';
+  const aiUrlVersion = '3.9.38';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -1501,7 +1501,7 @@ app.get('/ai-test', async (req, res) => {
 // In-memory translation cache. This is especially useful on Android/Android TV,
 // where a slow subtitle URL may be requested more than once. Completed results
 // are reused immediately on later subtitle requests.
-// v3.9.40: cache the character/relationship guide per show+model so later
+// v3.9.38: cache the character/relationship guide per show+model so later
 // episodes do not pay the extra Gemini guide-generation request again.
 const characterGuideCache = new Map();
 const CHARACTER_GUIDE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -1511,7 +1511,7 @@ const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TRANSLATION_CACHE_MAX = 40;
 const translationInFlight = new Map();
 
-// v3.9.40: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
+// v3.9.38: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
 // previous episode and request it again when a new episode opens. Old URLs must
 // not start Gemini or return the temporary status subtitle.
 const subtitleActivation = new Map();
@@ -1573,7 +1573,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.40',
+    'v3.9.38',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -1689,7 +1689,7 @@ function writeLiveStatus(res, state, force = false) {
 
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target, gate } = req.query;
-  // v3.9.40 diagnostic: capture the client request fingerprint so we can verify
+  // v3.9.38 diagnostic: capture the client request fingerprint so we can verify
   // whether Nuvio sends different headers for preload vs manual subtitle select.
   // Do NOT log query strings/config/API keys.
   console.log('[translate-sub headers]', JSON.stringify({
@@ -2000,16 +2000,16 @@ app.get('/translate-sub', async (req, res) => {
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
   - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
-      const chunks = splitSrtIntoChunks(originalSrt, 10000);
+      const chunks = splitSrtIntoChunks(originalSrt, 14000);
       const translated = [];
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
       const workerCount = Math.max(1, Math.min(3, geminiKeys.length));
-      // v3.9.40: keep the faster 10k chunks and 4.5s per-key spacing.
+      // v3.9.38: keep the faster 14k chunks and 4.5s per-key spacing.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
-      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk 10k | key interval 4.5s | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
+      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk 14k | key interval 4.5s | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
 
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
@@ -2169,7 +2169,7 @@ Lần trả lời trước đã làm mất hoặc gộp cue. Lần này bắt bu
     const statusMessage =
       `🟡 Gemini AI đang dịch phụ đề...\n` +
       `⏱️ Dự kiến ${mediaLabel}: khoảng ${expectedTime}\n` +
-      `⚡ Đã tối ưu 3 luồng Gemini song song + chunk 10.000\n` +
+      `⚡ Đã tối ưu 3 luồng Gemini song song + chunk 14.000\n` +
       `🔄 Khi dịch xong, bấm Reload phụ đề để nhận bản Việt.`;
     return res.send(makeStatusSrt(statusMessage, 3600));
   } catch (err) {
@@ -2195,4 +2195,3 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
-
