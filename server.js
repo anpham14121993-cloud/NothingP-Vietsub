@@ -78,7 +78,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.30</h2>
+<h2>NothingP AIOsubtitles v3.9.34</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -125,6 +125,7 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 </html>`);
 }
 
+// v3.9.34: per-episode job isolation + source-timestamp-locked SRT + seek-safe subtitle output.
 // v3.9.31: Android TV subtitle playback + click-trigger translation fix.
 // v3.9.30: deterministic provider order for the configuration page.
 // This is separate from the subtitle-picker order.
@@ -138,7 +139,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.31',
+  version: '3.9.34',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -150,7 +151,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.31', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.34', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -185,17 +186,19 @@ function isEnglish(value) {
 // v3.9.31: Android TV / Media3-safe SRT normalization.
 // Gemini is allowed to translate text only; timestamps are taken from the
 // original subtitle and validated again before the final file is returned.
-function normalizeSrtForPlayback(input) {
+function parseSrtCues(input) {
   const raw = String(input || '')
     .replace(/^\uFEFF/, '')
     .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n');
+    .replace(/\r/g, '\n')
+    .replace(/```(?:srt|subtitle|text)?/gi, '')
+    .replace(/```/g, '');
 
   const blocks = raw.split(/\n{2,}/);
   const cues = [];
 
-  const toMs = (s) => {
-    const m = String(s).trim().match(/^(\d{1,3}):(\d{2}):(\d{2})[,.](\d{1,3})$/);
+  const toMs = value => {
+    const m = String(value || '').trim().match(/^(\d{1,3}):(\d{2}):(\d{2})[,.](\d{1,3})$/);
     if (!m) return null;
     const h = Number(m[1]);
     const min = Number(m[2]);
@@ -208,22 +211,10 @@ function normalizeSrtForPlayback(input) {
     return (((h * 60 + min) * 60 + sec) * 1000) + ms;
   };
 
-  const fromMs = (ms) => {
-    ms = Math.max(0, Math.round(ms));
-    const h = Math.floor(ms / 3600000);
-    ms %= 3600000;
-    const min = Math.floor(ms / 60000);
-    ms %= 60000;
-    const sec = Math.floor(ms / 1000);
-    const milli = ms % 1000;
-    return `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}:${String(sec).padStart(2,'0')},${String(milli).padStart(3,'0')}`;
-  };
-
   for (const block of blocks) {
     const lines = block.split('\n');
     if (lines.length < 2) continue;
-
-    let timeIndex = lines.findIndex(line =>
+    const timeIndex = lines.findIndex(line =>
       /^\s*\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}(?:\s+.*)?\s*$/.test(line)
     );
     if (timeIndex < 0) continue;
@@ -232,38 +223,93 @@ function normalizeSrtForPlayback(input) {
       /^\s*(\d{1,3}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,3}:\d{2}:\d{2}[,.]\d{1,3})/
     );
     if (!tm) continue;
-
     const start = toMs(tm[1]);
     const end = toMs(tm[2]);
     if (start == null || end == null || end <= start) continue;
 
-    const body = lines.slice(timeIndex + 1)
-      .join('\n')
-      .replace(/```(?:srt|subtitle|text)?/gi, '')
-      .replace(/```/g, '')
-      .trim();
-
+    const body = lines.slice(timeIndex + 1).join('\n').trim();
     if (!body) continue;
-
     cues.push({ start, end, body });
   }
 
-  cues.sort((a, b) => a.start - b.start || a.end - b.end);
+  return cues;
+}
 
-  // Deduplicate exact timestamp/text duplicates, which can otherwise make
-  // some TV subtitle renderers discard a following cue.
-  const seen = new Set();
+function srtMs(ms) {
+  ms = Math.max(0, Math.round(Number(ms) || 0));
+  const h = Math.floor(ms / 3600000);
+  ms %= 3600000;
+  const m = Math.floor(ms / 60000);
+  ms %= 60000;
+  const s = Math.floor(ms / 1000);
+  const milli = ms % 1000;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(milli).padStart(3, '0')}`;
+}
+
+function buildSrtFromCues(cues) {
   const unique = [];
-  for (const cue of cues) {
-    const key = `${cue.start}|${cue.end}|${cue.body}`;
+  const seen = new Set();
+  for (const cue of cues || []) {
+    if (!cue || cue.start == null || cue.end == null || cue.end <= cue.start) continue;
+    const body = String(cue.body || '').trim();
+    if (!body) continue;
+    const key = `${cue.start}|${cue.end}|${body}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    unique.push(cue);
+    unique.push({ start: cue.start, end: cue.end, body });
+  }
+  unique.sort((a, b) => a.start - b.start || a.end - b.end);
+  return unique.map((cue, i) =>
+    `${i + 1}\n${srtMs(cue.start)} --> ${srtMs(cue.end)}\n${cue.body}`
+  ).join('\n\n') + (unique.length ? '\n' : '');
+}
+
+function normalizeSrtForPlayback(input) {
+  // Final safety pass for Android/Media3: strict timestamps, UTF-8 cleanup,
+  // deterministic ordering, duplicate removal, and continuous numbering.
+  return buildSrtFromCues(parseSrtCues(input));
+}
+
+function rebuildTranslatedSrtFromSource(sourceSrt, translatedChunks) {
+  // CRITICAL v3.9.34:
+  // Gemini may occasionally alter/duplicate timestamps while translating.
+  // Never trust Gemini's timeline. The ORIGINAL subtitle is the sole source of
+  // truth for start/end times. Each translated chunk is aligned by cue order.
+  const sourceChunks = splitSrtIntoChunks(sourceSrt, 14000);
+  const finalCues = [];
+
+  const cleanBody = value => String(value || '')
+    .replace(/```(?:srt|subtitle|text)?/gi, '')
+    .replace(/```/g, '')
+    .trim();
+
+  const ordered = [...(translatedChunks || [])].sort((a, b) => a.index - b.index);
+  if (ordered.length !== sourceChunks.length) {
+    throw new Error(`SRT chunk mismatch: nguồn=${sourceChunks.length}, bản dịch=${ordered.length}`);
   }
 
-  return unique.map((cue, i) =>
-    `${i + 1}\n${fromMs(cue.start)} --> ${fromMs(cue.end)}\n${cue.body}`
-  ).join('\n\n') + (unique.length ? '\n' : '');
+  for (let i = 0; i < sourceChunks.length; i++) {
+    const sourceCues = parseSrtCues(sourceChunks[i]);
+    const translatedCues = parseSrtCues(ordered[i].text);
+    if (!sourceCues.length) continue;
+    if (translatedCues.length !== sourceCues.length) {
+      throw new Error(`Chunk ${i + 1}: số cue không khớp (nguồn=${sourceCues.length}, dịch=${translatedCues.length})`);
+    }
+
+    for (let j = 0; j < sourceCues.length; j++) {
+      const translatedBody = cleanBody(translatedCues[j].body);
+      if (!translatedBody) {
+        throw new Error(`Chunk ${i + 1}, cue ${j + 1}: bản dịch rỗng`);
+      }
+      finalCues.push({
+        start: sourceCues[j].start,
+        end: sourceCues[j].end,
+        body: translatedBody
+      });
+    }
+  }
+
+  return buildSrtFromCues(finalCues);
 }
 
 function subtitleName(sub, fallback) {
@@ -442,22 +488,8 @@ function parseTimeToMs(timeStr) {
 }
 
 function cleanAndRebuildSrt(srtText) {
-  const blocks = srtText.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
-  const entries = [];
-
-  for (const block of blocks) {
-    const lines = block.split('\n');
-    const timeLineIdx = lines.findIndex(line => line.includes('-->'));
-    if (timeLineIdx < 0) continue;
-
-    const [start, end] = lines[timeLineIdx].split('-->').map(s => s.trim());
-    const text = lines.slice(timeLineIdx + 1).join('\n');
-    if (start && end && text) {
-      entries.push({ start, end, text, startMs: parseTimeToMs(start) });
-    }
-  }
-  entries.sort((a, b) => a.startMs - b.startMs);
-  return entries.map((e, index) => `${index + 1}\n${e.start} --> ${e.end}\n${e.text}`).join('\n\n') || srtText;
+  // Kept for backward compatibility with older helper calls.
+  return normalizeSrtForPlayback(srtText);
 }
 
 // Each API key belongs to its own Google Cloud project. Keep a separate
@@ -904,7 +936,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   //
   // Bump this constant only when intentionally invalidating old client-side
   // subtitle URLs after a future protocol/response change.
-  const aiUrlVersion = '2';
+  const aiUrlVersion = '3.9.34';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -1493,13 +1525,20 @@ function makeTranslationCacheKey({
           ? `subsource:${subtitleId || ''}`
           : `url:${url || sourceUrl || ''}`;
 
+  const normalizedImdb = String(imdbId || '').trim().toLowerCase();
+  const normalizedType = String(type || '').trim().toLowerCase();
+  const normalizedSeason = season === '' || season == null ? '-' : String(Number(season));
+  const normalizedEpisode = episode === '' || episode == null ? '-' : String(Number(episode));
+  const normalizedModel = String(model || '').trim();
+
   return [
+    'v3.9.34',
     logicalSource,
-    model || '',
-    imdbId || '',
-    type || '',
-    season || '',
-    episode || ''
+    normalizedModel,
+    normalizedImdb,
+    normalizedType,
+    normalizedSeason,
+    normalizedEpisode
   ].join('|');
 }
 
@@ -1918,8 +1957,11 @@ app.get('/translate-sub', async (req, res) => {
   - Không đưa ghi chú của người dịch vào phụ đề.
 
   ĐỊNH DẠNG:
-  - Giữ nguyên tuyệt đối số thứ tự subtitle.
-  - Giữ nguyên tuyệt đối timestamps.
+  - Mỗi cue đầu vào phải tạo đúng MỘT cue đầu ra. Không gộp, tách, bỏ hoặc nhân đôi cue.
+  - Giữ nguyên tuyệt đối số lượng cue và thứ tự cue.
+  - Không được sửa bất kỳ timestamp nào.
+  - Không được tạo timestamp mới.
+  - Chỉ thay phần lời thoại tiếng Anh bằng tiếng Việt; mọi dòng timestamp phải được giữ nguyên byte-for-byte.
   - Giữ nguyên cấu trúc SRT.
   - Chỉ trả về SRT đã dịch, không markdown, không giải thích.
 
@@ -1981,9 +2023,15 @@ app.get('/translate-sub', async (req, res) => {
 
       // Workers finish out of order; restore the original SRT chunk order.
       translated.sort((a, b) => a.index - b.index);
-      const finalSrt = cleanAndRebuildSrt(translated.map(t => t.text).join('\n\n'));
-      console.log(`📤 [Gemini AI] Đã ghép SRT và lưu cache | ${finalSrt.length.toLocaleString()} ký tự`);
-      setCachedTranslation(cacheKey, finalSrt);
+
+      // v3.9.34: rebuild the final subtitle timeline from ORIGINAL SRT cues.
+      // This prevents Gemini timestamp drift/duplication from causing subtitle
+      // overlap, double-rendering, and seek artifacts on Android TV/Media3.
+      const finalSrt = rebuildTranslatedSrtFromSource(originalSrt, translated);
+      const finalNormalizedSrt = normalizeSrtForPlayback(finalSrt);
+      if (!finalNormalizedSrt) throw new Error('Bản dịch cuối rỗng sau khi chuẩn hóa SRT.');
+      console.log(`📤 [Gemini AI] Đã ghép SRT theo timestamp gốc và lưu cache | ${finalNormalizedSrt.length.toLocaleString()} ký tự`);
+      setCachedTranslation(cacheKey, finalNormalizedSrt);
 
       // Verify that the FINAL SRT is immediately readable from cache.
       const verifiedFinalSrt = getCachedTranslation(cacheKey);
@@ -2000,7 +2048,7 @@ app.get('/translate-sub', async (req, res) => {
       console.log(`🟢 [Gemini AI] Background job hoàn tất | cache ready | ${cacheKey.slice(0, 120)}`);
       // Request #1 has already returned the temporary status SRT.
       // The completed SRT is delivered only when a later request hits the cache.
-      return finalSrt;
+      return finalNormalizedSrt;
 
       } catch (err) {
         const errorMessage = String(err.message || err).replace(/\r?\n/g, ' ').slice(0, 300);
@@ -2030,7 +2078,7 @@ app.get('/translate-sub', async (req, res) => {
       `🟡 Gemini AI đang dịch phụ đề...\n` +
       `📦 Đang xử lý ngầm bằng ${selectedModel}\n` +
       `🔄 Khi dịch xong, bấm Reload phụ đề để nhận bản Việt.`;
-    return res.send(makeStatusSrt(statusMessage, statusState.etaSeconds));
+    return res.send(makeStatusSrt(statusMessage, 5));
   } catch (err) {
     console.error('[translate-sub setup]', err.stack || err.message || err);
     return res.send(
@@ -2054,4 +2102,3 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
-
