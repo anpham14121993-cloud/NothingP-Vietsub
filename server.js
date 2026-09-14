@@ -139,7 +139,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.34',
+  version: '3.9.35',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -151,7 +151,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.34', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.35', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -455,7 +455,7 @@ async function fetchSubsourceSubtitleText(subtitleId, apiKey) {
   return extractSubtitleText(Buffer.from(response.data));
 }
 
-function splitSrtIntoChunks(srt, maxChars = 14000) {
+function splitSrtIntoChunks(srt, maxChars = 8000) {
   // v3.9.18 anti-timeout: use larger chunks so each subtitle needs fewer
   // Gemini request cycles. Never split a subtitle block in the middle.
   // With the existing 3-key / 8s-per-key limiter, fewer requests is much
@@ -927,6 +927,9 @@ async function handleSubtitles(req, res, encodedConfig) {
   const hostUrl = makeHostUrl(req);
   const modelToUse = config.model || 'gemini-3.5-flash-lite';
 
+  // Fresh token for the currently requested episode; old episode URLs become inert.
+  const activationToken = createSubtitleActivation(imdbId, type, season, episode);
+
   // SAME-TRACK MODE:
   // Keep one stable Gemini subtitle URL for the lifetime of this subtitle track.
   // The click request returns one temporary status SRT and starts the background job.
@@ -936,7 +939,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   //
   // Bump this constant only when intentionally invalidating old client-side
   // subtitle URLs after a future protocol/response change.
-  const aiUrlVersion = '3.9.34';
+  const aiUrlVersion = '3.9.35';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -1018,7 +1021,7 @@ async function handleSubtitles(req, res, encodedConfig) {
         // Gemini starts only if the client actually requests this URL.
         // Keep lang='eng' so Vietnamese auto-subtitle preferences do not treat
         // this Gemini trigger as a Vietnamese/native subtitle.
-        const aiUrl = `${hostUrl}/translate-sub?provider=os&fileId=${encodeURIComponent(file.file_id)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
+        const aiUrl = `${hostUrl}/translate-sub?provider=os&fileId=${encodeURIComponent(file.file_id)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&gate=${encodeURIComponent(activationToken)}&v=${aiUrlVersion}`;
         return {
           id: pickerId,
           url: aiUrl,
@@ -1123,7 +1126,7 @@ async function handleSubtitles(req, res, encodedConfig) {
         } else if (!vi && isEnglish(lang)) {
           // MANUAL-SELECT ONLY: Selecting this English entry triggers EN -> VI.
           // Never call this URL from subtitle discovery.
-          const aiUrl = `${hostUrl}/translate-sub?provider=subdl&sourceUrl=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
+          const aiUrl = `${hostUrl}/translate-sub?provider=subdl&sourceUrl=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&gate=${encodeURIComponent(activationToken)}&v=${aiUrlVersion}`;
           englishOriginalSubtitles.push({
             id: pickerId,
             url: aiUrl,
@@ -1238,7 +1241,7 @@ async function handleSubtitles(req, res, encodedConfig) {
             `&config=${encodeURIComponent(encodedConfig || '')}` +
             `&imdbId=${encodeURIComponent(imdbId)}` +
             `&type=${encodeURIComponent(type)}` +
-            `&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
+            `&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&gate=${encodeURIComponent(activationToken)}&v=${aiUrlVersion}`;
           // MANUAL-SELECT ONLY: Selecting this English entry triggers EN -> VI.
           // Never call this URL from subtitle discovery.
           englishOriginalSubtitles.push({
@@ -1501,6 +1504,37 @@ const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TRANSLATION_CACHE_MAX = 40;
 const translationInFlight = new Map();
 
+// v3.9.35: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
+// previous episode and request it again when a new episode opens. Old URLs must
+// not start Gemini or return the temporary status subtitle.
+const subtitleActivation = new Map();
+const SUBTITLE_ACTIVATION_TTL_MS = 15 * 60 * 1000;
+
+function makeActivationShowKey(imdbId, type) {
+  return `${String(imdbId || '').trim().toLowerCase()}|${String(type || '').trim().toLowerCase()}`;
+}
+function makeActivationEpisodeKey(season, episode) {
+  const s = season === '' || season == null ? '-' : String(Number(season));
+  const e = episode === '' || episode == null ? '-' : String(Number(episode));
+  return `${s}|${e}`;
+}
+function createSubtitleActivation(imdbId, type, season, episode) {
+  const showKey = makeActivationShowKey(imdbId, type);
+  const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  subtitleActivation.set(showKey, { token, episodeKey: makeActivationEpisodeKey(season, episode), createdAt: Date.now() });
+  const now = Date.now();
+  for (const [key, entry] of subtitleActivation) {
+    if (!entry || now - entry.createdAt > SUBTITLE_ACTIVATION_TTL_MS) subtitleActivation.delete(key);
+  }
+  return token;
+}
+function isSubtitleActivationValid(imdbId, type, season, episode, token) {
+  if (!token) return false;
+  const entry = subtitleActivation.get(makeActivationShowKey(imdbId, type));
+  if (!entry || Date.now() - entry.createdAt > SUBTITLE_ACTIVATION_TTL_MS) return false;
+  return entry.token === String(token) && entry.episodeKey === makeActivationEpisodeKey(season, episode);
+}
+
 function makeTranslationCacheKey({
   url,
   provider,
@@ -1532,7 +1566,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.34',
+    'v3.9.35',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -1647,7 +1681,7 @@ function writeLiveStatus(res, state, force = false) {
 }
 
 app.get('/translate-sub', async (req, res) => {
-  const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
+  const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target, gate } = req.query;
   // v3.9.33 MANUAL-SELECT GATE:
   // /translate-sub is intentionally a separate resource URL. The subtitle
   // discovery route only advertises this URL; it never downloads the source
@@ -1683,6 +1717,17 @@ app.get('/translate-sub', async (req, res) => {
   }
 
   let cacheKey = '';
+
+  // Block stale/unarmed URLs before cache/source/Gemini work. This prevents an old
+  // S01E12 subtitle URL from producing a status message while S02E04 is open.
+  if (!isSubtitleActivationValid(imdbId, type, season, episode, gate)) {
+    console.log('[translate-sub STALE/UNARMED BLOCKED]', JSON.stringify({
+      imdbId: imdbId || '', type: type || '', season: season || '', episode: episode || '',
+      provider: provider || '', gatePresent: !!gate
+    }));
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    return res.send('');
+  }
 
   try {
     const config = parseConfig(configQuery);
@@ -1924,7 +1969,7 @@ app.get('/translate-sub', async (req, res) => {
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
   - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
-      const chunks = splitSrtIntoChunks(originalSrt, 14000);
+      const chunks = splitSrtIntoChunks(originalSrt, 8000);
       const translated = [];
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
@@ -1941,51 +1986,61 @@ app.get('/translate-sub', async (req, res) => {
         const progressLabel = `${i + 1}/${chunks.length}`;
         console.log(`⏳ [Gemini AI] Đang dịch chunk ${progressLabel} | worker-key=${workerKeys.indexOf(workerKey) + 1}`);
 
-        const prompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
+        const sourceChunk = chunks[i];
+        const expectedCueCount = parseSrtCues(sourceChunk).length;
+        const basePrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
-  MỤC TIÊU:
-  Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${contextGuide}
+MỤC TIÊU:
+Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${contextGuide}
 
-  NGUYÊN TẮC XƯNG HÔ:
-  - Ưu tiên tuyệt đối thông tin nhân vật/quan hệ có bằng chứng trong phần ngữ cảnh ở trên.
-  - Giữ nhất quán cách xưng hô giữa các nhân vật xuyên suốt bộ phim.
-  - Không thay đổi cách xưng hô chỉ vì một câu thoại đứng riêng lẻ.
-  - Khi quan hệ chưa xác định, dùng ngữ cảnh câu thoại để chọn cách xưng hô tự nhiên nhất nhưng KHÔNG bịa quan hệ.
-  - Phân biệt đại từ người nói với từ gọi người nghe; không dịch máy móc "you" thành một đại từ cố định.
-  - Giữ tên riêng, chức danh, biệt danh và thuật ngữ quan trọng nhất quán.
-  - Nếu câu thoại có sắc thái kính trọng, khinh miệt, thân mật, đe dọa, mỉa mai... hãy thể hiện bằng tiếng Việt.
-  - Không đưa ghi chú của người dịch vào phụ đề.
+NGUYÊN TẮC XƯNG HÔ:
+- Ưu tiên tuyệt đối thông tin nhân vật/quan hệ có bằng chứng trong phần ngữ cảnh ở trên.
+- Giữ nhất quán cách xưng hô giữa các nhân vật xuyên suốt bộ phim.
+- Không thay đổi cách xưng hô chỉ vì một câu thoại đứng riêng lẻ.
+- Khi quan hệ chưa xác định, dùng ngữ cảnh câu thoại để chọn cách xưng hô tự nhiên nhất nhưng KHÔNG bịa quan hệ.
+- Phân biệt đại từ người nói với từ gọi người nghe; không dịch máy móc "you" thành một đại từ cố định.
+- Giữ tên riêng, chức danh, biệt danh và thuật ngữ quan trọng nhất quán.
+- Nếu câu thoại có sắc thái kính trọng, khinh miệt, thân mật, đe dọa, mỉa mai... hãy thể hiện bằng tiếng Việt.
+- Không đưa ghi chú của người dịch vào phụ đề.
 
-  ĐỊNH DẠNG:
-  - Mỗi cue đầu vào phải tạo đúng MỘT cue đầu ra. Không gộp, tách, bỏ hoặc nhân đôi cue.
-  - Giữ nguyên tuyệt đối số lượng cue và thứ tự cue.
-  - Không được sửa bất kỳ timestamp nào.
-  - Không được tạo timestamp mới.
-  - Chỉ thay phần lời thoại tiếng Anh bằng tiếng Việt; mọi dòng timestamp phải được giữ nguyên byte-for-byte.
-  - Giữ nguyên cấu trúc SRT.
-  - Chỉ trả về SRT đã dịch, không markdown, không giải thích.
+ĐỊNH DẠNG BẮT BUỘC:
+- Đoạn nguồn có ĐÚNG ${expectedCueCount} cue. Phải trả về ĐÚNG ${expectedCueCount} cue.
+- Giữ nguyên tuyệt đối từng số thứ tự và từng timestamp.
+- MỖI cue nguồn phải có đúng MỘT cue dịch; không gộp, không tách, không bỏ qua kể cả cue rất ngắn.
+- Không được thay đổi, làm tròn, nối hoặc suy đoán timestamp.
+- Chỉ dịch phần text của từng cue.
+- Chỉ trả về SRT đã dịch, không markdown, không giải thích.
 
-  SRT CẦN DỊCH:
-  ${chunks[i]}`;
+SRT CẦN DỊCH:
+${sourceChunk}`;
 
-        // Start with this worker's dedicated key, then fail over through the
-        // remaining keys if quota/auth/transient errors prevent that key from working.
         const primaryIndex = workerKeys.indexOf(workerKey);
         const orderedKeys = primaryIndex >= 0
           ? workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex))
           : workerKeys;
 
-        const aiRes = await callAIWithModelFallback(prompt, orderedKeys, selectedModel, 0);
+        let aiRes = null;
+        let accepted = false;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const prompt = attempt === 1
+            ? basePrompt
+            : `${basePrompt}
 
-        if (!aiRes.result) {
-          console.error(`[Gemini translation chunk ${i + 1}/${chunks.length}]`, aiRes.error);
-
-          // IMPORTANT: never return untouched English as a Vietnamese subtitle.
-          // Stremio would otherwise show "Tiếng Việt" while the actual text
-          // remains English.
-          throw new Error(
-            `Gemini không dịch được đoạn ${i + 1}/${chunks.length}: ${aiRes.error || 'không có phản hồi'}`
-          );
+CẢNH BÁO SỬA LỖI:
+Lần trả lời trước đã làm mất hoặc gộp cue. Lần này bắt buộc khôi phục đủ ${expectedCueCount}/${expectedCueCount} cue. Không được bỏ bất kỳ cue nào. Kiểm tra số cue trước khi trả lời.`;
+          aiRes = await callAIWithModelFallback(prompt, orderedKeys, selectedModel, 0);
+          if (!aiRes.result) {
+            if (attempt === 2) throw new Error(`Gemini không dịch được đoạn ${i + 1}/${chunks.length}: ${aiRes.error || 'không có phản hồi'}`);
+            continue;
+          }
+          const returnedCueCount = parseSrtCues(aiRes.result).length;
+          console.log(`[Gemini AI] Kiểm tra chunk ${i + 1}/${chunks.length}: nguồn=${expectedCueCount}, dịch=${returnedCueCount}, attempt=${attempt}`);
+          if (returnedCueCount === expectedCueCount) { accepted = true; break; }
+          if (attempt === 1) console.warn(`[Gemini AI] Chunk ${i + 1}/${chunks.length} lệch cue (${expectedCueCount} → ${returnedCueCount}), retry repair.`);
+        }
+        if (!accepted || !aiRes?.result) {
+          const returned = aiRes?.result ? parseSrtCues(aiRes.result).length : 0;
+          throw new Error(`Chunk ${i + 1}: số cue không khớp sau retry (nguồn=${expectedCueCount}, dịch=${returned})`);
         }
 
         translated.push({
@@ -2102,3 +2157,4 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
+
