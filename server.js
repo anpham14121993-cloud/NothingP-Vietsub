@@ -1,3 +1,4 @@
+// NothingP AIOsubtitles v3.9.52 — Turbo: 20K/180 + parallel per-key + hard 15 RPM/key + overlap
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -78,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.48</h2>
+<h2>NothingP AIOsubtitles v3.9.52</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -139,7 +140,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.46',
+  version: '3.9.52',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -151,7 +152,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.46', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.52', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -514,11 +515,12 @@ function cleanAndRebuildSrt(srtText) {
   return normalizeSrtForPlayback(srtText);
 }
 
-// Each API key belongs to its own Google Cloud project. Keep a separate
-// request-start limiter per key so 3 independent projects can work in parallel.
-// Requests on the same key are serialized to avoid bursts across simultaneous
-// subtitle jobs.
-const GEMINI_MIN_INTERVAL_MS = 4000;
+// Each API key has an independent rolling 15-RPM budget.
+// v3.9.52: quota reservation is serialized, but the actual Gemini HTTP calls
+// on the SAME key are NOT serialized. This lets one key consume its available
+// 15-request rolling budget as fast as the API responds, while never starting
+// request #16 inside the same rolling 60-second window.
+const GEMINI_MIN_INTERVAL_MS = 0;
 const GEMINI_MAX_REQUESTS_PER_MINUTE = 15;
 const GEMINI_MAX_TOTAL_REQUESTS_PER_MINUTE = 45;
 const GEMINI_WINDOW_MS = 60000;
@@ -527,7 +529,7 @@ const geminiGlobalState = { starts: [], queue: Promise.resolve() };
 
 function getGeminiKeyState(key) {
   if (!geminiKeyState.has(key)) {
-    geminiKeyState.set(key, { starts: [], lastRequestAt: 0, queue: Promise.resolve() });
+    geminiKeyState.set(key, { starts: [], queue: Promise.resolve() });
   }
   return geminiKeyState.get(key);
 }
@@ -536,57 +538,54 @@ function pruneRequestStarts(starts, now = Date.now()) {
   while (starts.length && now - starts[0] >= GEMINI_WINDOW_MS) starts.shift();
 }
 
-async function waitForRequestQuota(state, maxRequests) {
+async function waitForRollingQuota(state, maxRequests) {
   while (true) {
     const now = Date.now();
     pruneRequestStarts(state.starts, now);
-    const intervalWait = state.lastRequestAt
-      ? Math.max(0, GEMINI_MIN_INTERVAL_MS - (now - state.lastRequestAt))
-      : 0;
-    if (state.starts.length < maxRequests && intervalWait <= 0) return;
-
-    let waitMs = intervalWait;
-    if (state.starts.length >= maxRequests) {
-      waitMs = Math.max(waitMs, GEMINI_WINDOW_MS - (now - state.starts[0]) + 25);
-    }
+    if (state.starts.length < maxRequests) return;
+    const waitMs = GEMINI_WINDOW_MS - (now - state.starts[0]) + 25;
     await new Promise(r => setTimeout(r, Math.max(25, waitMs)));
   }
 }
 
-async function withGeminiKeySlot(key, fn) {
-  const state = getGeminiKeyState(key);
+function enqueueReservation(queueState, reserveFn) {
+  const previous = queueState.queue;
   let release;
   const next = new Promise(resolve => { release = resolve; });
-  const previous = state.queue;
-  state.queue = previous.then(() => next);
-
-  await previous;
-  try {
-    // Per-key hard cap: never start more than 15 requests in any rolling 60s
-    // window, and never start two requests on the same key less than 4s apart.
-    await waitForRequestQuota(state, GEMINI_MAX_REQUESTS_PER_MINUTE);
-
-    // Global hard cap: across all 3 keys, never start more than 45 requests
-    // in any rolling 60s window. The global queue serializes quota reservation,
-    // while the actual Gemini HTTP calls remain parallel across different keys.
-    let globalRelease;
-    const globalNext = new Promise(resolve => { globalRelease = resolve; });
-    const globalPrevious = geminiGlobalState.queue;
-    geminiGlobalState.queue = globalPrevious.then(() => globalNext);
-    await globalPrevious;
+  queueState.queue = previous.then(() => next);
+  return previous.then(async () => {
     try {
-      await waitForRequestQuota(geminiGlobalState, GEMINI_MAX_TOTAL_REQUESTS_PER_MINUTE);
-      const startedAt = Date.now();
-      state.lastRequestAt = startedAt;
-      state.starts.push(startedAt);
-      geminiGlobalState.starts.push(startedAt);
-      return await fn();
+      return await reserveFn();
     } finally {
-      globalRelease();
+      release();
     }
-  } finally {
-    release();
-  }
+  });
+}
+
+async function reserveGeminiRequestSlot(key) {
+  const state = getGeminiKeyState(key);
+
+  // Serialize ONLY the quota reservation. Once reserved, the network request
+  // is released to run independently, so multiple requests can be in-flight
+  // simultaneously on the same key.
+  await enqueueReservation(state, async () => {
+    await waitForRollingQuota(state, GEMINI_MAX_REQUESTS_PER_MINUTE);
+    const now = Date.now();
+    state.starts.push(now);
+  });
+
+  // Global 45 RPM safety ceiling across the three configured keys.
+  await enqueueReservation(geminiGlobalState, async () => {
+    await waitForRollingQuota(geminiGlobalState, GEMINI_MAX_TOTAL_REQUESTS_PER_MINUTE);
+    geminiGlobalState.starts.push(Date.now());
+  });
+}
+
+async function withGeminiKeySlot(key, fn) {
+  await reserveGeminiRequestSlot(key);
+  // IMPORTANT: no per-key await/queue here. The request is now quota-reserved
+  // and can run immediately in parallel with other requests using this key.
+  return await fn();
 }
 
 async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
@@ -628,7 +627,7 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           .trim();
 
         if (result) {
-          const actualKeyIndex = (start + keyIndex) % keys.length;
+          const actualKeyIndex = keyIndex;
           console.log(`[Gemini ${selectedModel} / key #${actualKeyIndex + 1}] success`);
           return { result, error: null, model: selectedModel, keyIndex: actualKeyIndex };
         }
@@ -643,7 +642,7 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           `Gemini ${selectedModel}: lỗi không xác định`;
 
         lastError = message;
-        const actualKeyIndex = (start + keyIndex) % keys.length;
+        const actualKeyIndex = keyIndex;
         console.error(`[Gemini ${selectedModel} / key #${actualKeyIndex + 1}]`, message);
 
         if (
@@ -2080,16 +2079,16 @@ app.get('/translate-sub', async (req, res) => {
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
   - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
-      const chunks = splitSrtIntoChunks(originalSrt, 16000, 150);
+      const chunks = splitSrtIntoChunks(originalSrt, 20000, 180);
       const translated = [];
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
       const workerCount = Math.max(1, Math.min(3, geminiKeys.length));
-      // v3.9.48: use 16k/150-cue chunks to reduce total Gemini calls; hard 15 RPM/key and 45 RPM total quotas remain.
+      // v3.9.52: keep 20k/180-cue chunks; up to 5 workers/key; hard 15 RPM/key and 45 RPM total quotas remain; same-key requests may run concurrently after quota reservation.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
-      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk <=16k / <=150 cue | key interval 4s | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
+      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk <=20k / <=180 cue | parallel per-key quota | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
 
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
@@ -2198,7 +2197,7 @@ ${oneCueSrt}`;
         return { ok: true, sourceCues, translatedCues };
       };
 
-      // v3.9.48: overlap context — carry the tail of the PREVIOUS source chunk
+      // v3.9.48/49: overlap context — carry the tail of the PREVIOUS source chunk
       // into the next chunk prompt so dialogue/relationship context is not cut at
       // the chunk boundary. This is context only; Gemini must NOT translate it.
       // Keep the overlap small to improve continuity without materially increasing
@@ -2269,14 +2268,14 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
         throw new Error(`${label}: cue mismatch (${expectedCueCount} → ${returned})`);
       };
 
-      const translateChunk = async (i, workerKey) => {
+      const translateChunk = async (i, workerKey, workerIndex = 0) => {
         const startedAt = Date.now();
         const sourceChunk = chunks[i];
         const expectedCueCount = parseSrtCues(sourceChunk).length;
-        const primaryIndex = Math.max(0, workerKeys.indexOf(workerKey));
-        const orderedKeys = workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex));
+        const primaryIndex = Math.max(0, workerKeyIndexes[workerIndex] ?? 0);
+        const orderedKeys = baseWorkerKeys.slice(primaryIndex).concat(baseWorkerKeys.slice(0, primaryIndex));
         const keyHint = `${String(workerKey).slice(0, 4)}…${String(workerKey).slice(-4)}`;
-        console.log(`⏳ [Gemini AI] Đang dịch chunk ${i + 1}/${chunks.length} | ${expectedCueCount} cue | worker-key=${primaryIndex + 1} | key=${keyHint}`);
+        console.log(`⏳ [Gemini AI] Đang dịch chunk ${i + 1}/${chunks.length} | ${expectedCueCount} cue | worker=${workerIndex + 1}/${workerSlots.length} | key #${primaryIndex + 1} | key=${keyHint}`);
 
         try {
           const result = await translateOneValidated(sourceChunk, `chunk ${i + 1}/${chunks.length}`, orderedKeys, expectedCueCount, i);
@@ -2331,7 +2330,7 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
             }
           };
 
-          const repairedText = await translateCascade(sourceChunk, `repair ${i + 1}`, workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex)), 0, i);
+          const repairedText = await translateCascade(sourceChunk, `repair ${i + 1}`, baseWorkerKeys.slice(primaryIndex).concat(baseWorkerKeys.slice(0, primaryIndex)), 0, i);
           const repairedCueCount = parseSrtCues(repairedText).length;
           if (repairedCueCount !== expectedCueCount) {
             throw new Error(`Chunk ${i + 1}: repair cascade cue mismatch (${expectedCueCount} → ${repairedCueCount})`);
@@ -2342,22 +2341,37 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
         }
       };
 
-      // One worker per independent Google project/key.
-      // With 3 keys: worker #1 -> chunks 0,3,6...; #2 -> 1,4,7...;
-      // #3 -> 2,5,8... . Each key has its own limiter and queue.
-      const workerKeys = geminiKeys.slice(0, 3);
-      // v3.9.48: dynamic work-stealing. A fast key immediately takes the next
-      // chunk instead of waiting for a slower fixed-assignment worker. This keeps
-      // all independent projects busy without increasing per-key RPM/queue limits.
+      // v3.9.52: use up to 5 concurrent workers PER key. With 3 keys this
+      // gives up to 15 active workers, while the rolling limiter still hard-caps
+      // each individual key at 15 request starts per 60 seconds.
+      const baseWorkerKeys = geminiKeys.slice(0, 3);
+      const WORKERS_PER_KEY = 5;
+      const workerSlots = [];
+      const workerKeyIndexes = [];
+      for (let keyIndex = 0; keyIndex < baseWorkerKeys.length; keyIndex++) {
+        for (let slot = 0; slot < WORKERS_PER_KEY; slot++) {
+          workerSlots.push(baseWorkerKeys[keyIndex]);
+          workerKeyIndexes.push(keyIndex);
+        }
+      }
+      const activeWorkerCount = Math.min(chunks.length, workerSlots.length);
+      const activeWorkerSlots = workerSlots.slice(0, activeWorkerCount);
+      workerKeyIndexes.length = activeWorkerCount;
+
+      console.log(`🚀 [Gemini AI] Turbo concurrency: ${activeWorkerCount} worker | ${baseWorkerKeys.length} key | tối đa ${WORKERS_PER_KEY} request đồng thời/key | hard cap 15 RPM/key`);
+
+      // Dynamic work-stealing: any free worker immediately takes the next chunk.
+      // Multiple workers may share the same key; quota reservation is serialized
+      // per key, but the actual Gemini HTTP requests are intentionally parallel.
       let nextChunkIndex = 0;
       const worker = async (workerIndex, workerKey) => {
         while (true) {
           const i = nextChunkIndex++;
           if (i >= chunks.length) return;
-          await translateChunk(i, workerKey);
+          await translateChunk(i, workerKey, workerIndex);
         }
       };
-      await Promise.all(workerKeys.map((key, index) => worker(index, key)));
+      await Promise.all(activeWorkerSlots.map((key, index) => worker(index, key)));
 
       console.log(`🎉 [Gemini AI] Dịch hoàn tất ${translated.length}/${chunks.length} chunk. Đang ghép SRT...`);
 
