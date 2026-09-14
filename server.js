@@ -458,7 +458,7 @@ async function fetchSubsourceSubtitleText(subtitleId, apiKey) {
 }
 
 function splitSrtIntoChunks(srt, maxChars = 10000, maxCues = 100) {
-  // v3.9.43: keep the fast 10k target AND cap cue density at 100 cues.
+  // v3.9.44: keep the fast 10k target AND cap cue density at 100 cues.
   // Never split an individual SRT cue block.
   const blocks = srt.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
   const chunks = [];
@@ -515,14 +515,39 @@ function cleanAndRebuildSrt(srtText) {
 // request-start limiter per key so 3 independent projects can work in parallel.
 // Requests on the same key are serialized to avoid bursts across simultaneous
 // subtitle jobs.
-const GEMINI_MIN_INTERVAL_MS = 4000; // <=15 request starts/minute per project
+const GEMINI_MIN_INTERVAL_MS = 4000;
+const GEMINI_MAX_REQUESTS_PER_MINUTE = 15;
+const GEMINI_MAX_TOTAL_REQUESTS_PER_MINUTE = 45;
+const GEMINI_WINDOW_MS = 60000;
 const geminiKeyState = new Map();
+const geminiGlobalState = { starts: [], queue: Promise.resolve() };
 
 function getGeminiKeyState(key) {
   if (!geminiKeyState.has(key)) {
-    geminiKeyState.set(key, { lastRequestAt: 0, queue: Promise.resolve() });
+    geminiKeyState.set(key, { starts: [], lastRequestAt: 0, queue: Promise.resolve() });
   }
   return geminiKeyState.get(key);
+}
+
+function pruneRequestStarts(starts, now = Date.now()) {
+  while (starts.length && now - starts[0] >= GEMINI_WINDOW_MS) starts.shift();
+}
+
+async function waitForRequestQuota(state, maxRequests) {
+  while (true) {
+    const now = Date.now();
+    pruneRequestStarts(state.starts, now);
+    const intervalWait = state.lastRequestAt
+      ? Math.max(0, GEMINI_MIN_INTERVAL_MS - (now - state.lastRequestAt))
+      : 0;
+    if (state.starts.length < maxRequests && intervalWait <= 0) return;
+
+    let waitMs = intervalWait;
+    if (state.starts.length >= maxRequests) {
+      waitMs = Math.max(waitMs, GEMINI_WINDOW_MS - (now - state.starts[0]) + 25);
+    }
+    await new Promise(r => setTimeout(r, Math.max(25, waitMs)));
+  }
 }
 
 async function withGeminiKeySlot(key, fn) {
@@ -534,11 +559,28 @@ async function withGeminiKeySlot(key, fn) {
 
   await previous;
   try {
-    const now = Date.now();
-    const waitMs = Math.max(0, GEMINI_MIN_INTERVAL_MS - (now - state.lastRequestAt));
-    if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
-    state.lastRequestAt = Date.now();
-    return await fn();
+    // Per-key hard cap: never start more than 15 requests in any rolling 60s
+    // window, and never start two requests on the same key less than 4s apart.
+    await waitForRequestQuota(state, GEMINI_MAX_REQUESTS_PER_MINUTE);
+
+    // Global hard cap: across all 3 keys, never start more than 45 requests
+    // in any rolling 60s window. The global queue serializes quota reservation,
+    // while the actual Gemini HTTP calls remain parallel across different keys.
+    let globalRelease;
+    const globalNext = new Promise(resolve => { globalRelease = resolve; });
+    const globalPrevious = geminiGlobalState.queue;
+    geminiGlobalState.queue = globalPrevious.then(() => globalNext);
+    await globalPrevious;
+    try {
+      await waitForRequestQuota(geminiGlobalState, GEMINI_MAX_TOTAL_REQUESTS_PER_MINUTE);
+      const startedAt = Date.now();
+      state.lastRequestAt = startedAt;
+      state.starts.push(startedAt);
+      geminiGlobalState.starts.push(startedAt);
+      return await fn();
+    } finally {
+      globalRelease();
+    }
   } finally {
     release();
   }
@@ -2016,15 +2058,14 @@ app.get('/translate-sub', async (req, res) => {
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
       const workerCount = Math.max(1, Math.min(3, geminiKeys.length));
-      // v3.9.40: keep the faster 10k chunks and 4.5s per-key spacing.
+      // v3.9.44: keep the fast 10k/100-cue chunks with hard 15 RPM/key and 45 RPM total quotas.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
       console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk <=10k / <=100 cue | key interval 4s | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
 
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
-      // The limiter in callAI() still guarantees that Gemini request starts are
-      // spaced at least 8s apart per project, so each project stays around 7.5 RPM.
+      // The limiter in callAI() enforces the hard 15 RPM/key and 45 RPM total caps.
       const translateOneValidated = async (sourceChunk, label, orderedKeys, expectedCueCount) => {
         const basePrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
@@ -2081,27 +2122,55 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
           statusState.done = translated.length;
           console.log(`✅ [Gemini AI] Xong chunk ${i + 1}/${chunks.length} | ${((Date.now() - startedAt) / 1000).toFixed(1)}s | ${expectedCueCount} cue`);
         } catch (firstErr) {
-          console.warn(`⚠️ [Gemini AI] Chunk ${i + 1}/${chunks.length} lỗi cue; chuyển sang repair: ${firstErr.message}`);
-          const repairChunks = splitSrtByCueCount(sourceChunk, 50);
-          console.log(`🛠️ [Gemini AI] Repair chunk ${i + 1}: ${repairChunks.length} phần x tối đa 50 cue`);
+          console.warn(`⚠️ [Gemini AI] Chunk ${i + 1}/${chunks.length} lỗi cue; kích hoạt repair cascade: ${firstErr.message}`);
 
-          const repairResults = await Promise.all(repairChunks.map(async (repairChunk, repairIndex) => {
-            const repairCueCount = parseSrtCues(repairChunk).length;
-            const startKey = (primaryIndex + repairIndex) % Math.max(1, workerKeys.length);
-            const repairKeys = workerKeys.slice(startKey).concat(workerKeys.slice(0, startKey));
-            const text = await translateOneValidated(repairChunk, `repair ${i + 1}.${repairIndex + 1}`, repairKeys, repairCueCount);
-            return { index: repairIndex, text };
-          }));
+          // v3.9.44: do not fail a whole 100-cue chunk because Gemini dropped
+          // one or two cues. Retry only the problematic piece, then recursively
+          // reduce the cue size. This keeps the normal path fast while making
+          // pathological cue-dense sections progressively easier for Gemini.
+          const translateCascade = async (piece, label, keys, depth = 0) => {
+            const cueCount = parseSrtCues(piece).length;
+            try {
+              return await translateOneValidated(piece, label, keys, cueCount);
+            } catch (err) {
+              if (cueCount <= 1) throw err;
 
-          repairResults.sort((a, b) => a.index - b.index);
-          const repairedText = repairResults.map(x => x.text).join('\n\n');
+              let nextMax;
+              if (cueCount > 50) nextMax = 50;
+              else if (cueCount > 25) nextMax = 25;
+              else if (cueCount > 10) nextMax = 10;
+              else if (cueCount > 5) nextMax = 5;
+              else nextMax = 1;
+
+              const smaller = splitSrtByCueCount(piece, nextMax);
+              if (smaller.length <= 1) throw err;
+              console.warn(`🛠️ [Gemini AI] Cascade ${label}: ${cueCount} cue thất bại → ${smaller.length} phần x tối đa ${nextMax} cue`);
+
+              const results = await Promise.all(smaller.map(async (subPiece, subIndex) => {
+                const startKey = (primaryIndex + depth + subIndex) % Math.max(1, workerKeys.length);
+                const subKeys = workerKeys.slice(startKey).concat(workerKeys.slice(0, startKey));
+                const text = await translateCascade(subPiece, `${label}.${subIndex + 1}`, subKeys, depth + 1);
+                return { index: subIndex, text };
+              }));
+
+              results.sort((a, b) => a.index - b.index);
+              const joined = results.map(x => x.text).join('\n\n');
+              const joinedCount = parseSrtCues(joined).length;
+              if (joinedCount !== cueCount) {
+                throw new Error(`${label}: cascade cue mismatch (${cueCount} → ${joinedCount})`);
+              }
+              return joined;
+            }
+          };
+
+          const repairedText = await translateCascade(sourceChunk, `repair ${i + 1}`, workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex)));
           const repairedCueCount = parseSrtCues(repairedText).length;
           if (repairedCueCount !== expectedCueCount) {
-            throw new Error(`Chunk ${i + 1}: repair cue mismatch (${expectedCueCount} → ${repairedCueCount})`);
+            throw new Error(`Chunk ${i + 1}: repair cascade cue mismatch (${expectedCueCount} → ${repairedCueCount})`);
           }
           translated.push({ index: i, text: repairedText });
           statusState.done = translated.length;
-          console.log(`✅ [Gemini AI] Repair xong chunk ${i + 1}/${chunks.length} | ${((Date.now() - startedAt) / 1000).toFixed(1)}s | ${expectedCueCount} cue`);
+          console.log(`✅ [Gemini AI] Repair cascade xong chunk ${i + 1}/${chunks.length} | ${((Date.now() - startedAt) / 1000).toFixed(1)}s | ${expectedCueCount} cue`);
         }
       };
 
