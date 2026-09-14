@@ -78,7 +78,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.44</h2>
+<h2>NothingP AIOsubtitles v3.9.45</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -139,7 +139,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.44',
+  version: '3.9.45',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -151,7 +151,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.44', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.45', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -299,6 +299,9 @@ function rebuildTranslatedSrtFromSource(sourceChunks, translatedChunks) {
     }
 
     for (let j = 0; j < sourceCues.length; j++) {
+      if (translatedCues[j].start !== sourceCues[j].start || translatedCues[j].end !== sourceCues[j].end) {
+        throw new Error(`Chunk ${i + 1}, cue ${j + 1}: timestamp mismatch nguồn=${srtMs(sourceCues[j].start)} --> ${srtMs(sourceCues[j].end)} | dịch=${srtMs(translatedCues[j].start)} --> ${srtMs(translatedCues[j].end)}`);
+      }
       const translatedBody = cleanBody(translatedCues[j].body);
       if (!translatedBody) {
         throw new Error(`Chunk ${i + 1}, cue ${j + 1}: bản dịch rỗng`);
@@ -458,7 +461,7 @@ async function fetchSubsourceSubtitleText(subtitleId, apiKey) {
 }
 
 function splitSrtIntoChunks(srt, maxChars = 10000, maxCues = 100) {
-  // v3.9.44: keep the fast 10k target AND cap cue density at 100 cues.
+  // v3.9.45: keep the fast 10k target AND cap cue density at 100 cues.
   // Never split an individual SRT cue block.
   const blocks = srt.replace(/\r/g, '').trim().split(/\n\s*\n/).filter(Boolean);
   const chunks = [];
@@ -1574,7 +1577,7 @@ app.get('/ai-test', async (req, res) => {
 // In-memory translation cache. This is especially useful on Android/Android TV,
 // where a slow subtitle URL may be requested more than once. Completed results
 // are reused immediately on later subtitle requests.
-// v3.9.44: cache the character/relationship guide per show+model so later
+// v3.9.45: cache the character/relationship guide per show+model so later
 // episodes do not pay the extra Gemini guide-generation request again.
 const characterGuideCache = new Map();
 const CHARACTER_GUIDE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -1584,7 +1587,7 @@ const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TRANSLATION_CACHE_MAX = 40;
 const translationInFlight = new Map();
 
-// v3.9.44: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
+// v3.9.45: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
 // previous episode and request it again when a new episode opens. Old URLs must
 // not start Gemini or return the temporary status subtitle.
 const subtitleActivation = new Map();
@@ -1646,7 +1649,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.44',
+    'v3.9.45',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -1762,7 +1765,7 @@ function writeLiveStatus(res, state, force = false) {
 
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target, gate } = req.query;
-  // v3.9.44 diagnostic: capture the client request fingerprint so we can verify
+  // v3.9.45 diagnostic: capture the client request fingerprint so we can verify
   // whether Nuvio sends different headers for preload vs manual subtitle select.
   // Do NOT log query strings/config/API keys.
   console.log('[translate-sub headers]', JSON.stringify({
@@ -2025,7 +2028,7 @@ app.get('/translate-sub', async (req, res) => {
       // v3.9.23: build a structured movie/setting/character/relationship guide
       // BEFORE subtitle translation. The guide is generated once per translation
       // job, then reused by every translation chunk for consistent localization.
-      const subtitleSample = buildSubtitleContextSample(originalSrt, 9000);
+      const subtitleSample = buildSubtitleContextSample(originalSrt, 4000);
       let relationshipGuide = '';
       try {
         const guideKey = `${imdbId || 'unknown'}|${selectedModel}`;
@@ -2074,21 +2077,21 @@ app.get('/translate-sub', async (req, res) => {
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
   - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
-      const chunks = splitSrtIntoChunks(originalSrt, 10000, 100);
+      const chunks = splitSrtIntoChunks(originalSrt, 12000, 100);
       const translated = [];
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
       const workerCount = Math.max(1, Math.min(3, geminiKeys.length));
-      // v3.9.44: keep the fast 10k/100-cue chunks with hard 15 RPM/key and 45 RPM total quotas.
+      // v3.9.45: keep the fast 10k/100-cue chunks with hard 15 RPM/key and 45 RPM total quotas.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
-      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk <=10k / <=100 cue | key interval 4s | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
+      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk <=12k / <=100 cue | key interval 4s | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
 
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
       // The limiter in callAI() enforces the hard 15 RPM/key and 45 RPM total caps.
-      // v3.9.44 CUE REPAIR: when Gemini drops only a few cues, do NOT
+      // v3.9.45 CUE REPAIR: when Gemini drops only a few cues, do NOT
       // retransate the whole 100-cue chunk. Detect the missing source cues by
       // their original timestamps, translate only those cues, then rebuild the
       // chunk from the original timeline. This prevents the 90s+ full-chunk
@@ -2109,7 +2112,21 @@ app.get('/translate-sub', async (req, res) => {
           }
         }
 
-        const missing = sourceCues.filter(c => !translatedMap.has(cueIdentity(c)));
+        let missing = sourceCues.filter(c => !translatedMap.has(cueIdentity(c)));
+        // If counts match but timestamps were altered/reordered, repair by source index
+        // instead of accepting a structurally wrong result. Only repair the small
+        // number of affected cues; never retransate the entire chunk.
+        if (!missing.length && translatedCues.length === sourceCues.length) {
+          const badByIndex = [];
+          for (let i = 0; i < sourceCues.length; i++) {
+            if (translatedCues[i].start !== sourceCues[i].start || translatedCues[i].end !== sourceCues[i].end) {
+              badByIndex.push(i);
+            }
+          }
+          if (badByIndex.length && badByIndex.length <= 5) {
+            missing = badByIndex.map(i => sourceCues[i]);
+          }
+        }
         if (!missing.length || missing.length > 5) return null;
 
         console.warn(`🩹 [Gemini AI] ${label}: phát hiện ${missing.length} cue thiếu theo timestamp; chỉ repair cue thiếu.`);
@@ -2156,6 +2173,28 @@ ${oneCueSrt}`;
         return buildSrtFromCues(merged);
       };
 
+      const validateCueStructure = (sourceChunk, translatedText, label) => {
+        const sourceCues = parseSrtCues(sourceChunk);
+        const translatedCues = parseSrtCues(translatedText || '');
+        if (translatedCues.length !== sourceCues.length) {
+          return { ok: false, reason: `cue count ${sourceCues.length} -> ${translatedCues.length}`, sourceCues, translatedCues };
+        }
+        for (let i = 0; i < sourceCues.length; i++) {
+          if (translatedCues[i].start !== sourceCues[i].start || translatedCues[i].end !== sourceCues[i].end) {
+            return {
+              ok: false,
+              reason: `timestamp cue ${i + 1}: ${srtMs(sourceCues[i].start)} --> ${srtMs(sourceCues[i].end)} != ${srtMs(translatedCues[i].start)} --> ${srtMs(translatedCues[i].end)}`,
+              sourceCues,
+              translatedCues
+            };
+          }
+          if (!String(translatedCues[i].body || '').trim()) {
+            return { ok: false, reason: `empty body cue ${i + 1}`, sourceCues, translatedCues };
+          }
+        }
+        return { ok: true, sourceCues, translatedCues };
+      };
+
       const translateOneValidated = async (sourceChunk, label, orderedKeys, expectedCueCount) => {
         const basePrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
@@ -2190,9 +2229,10 @@ CẢNH BÁO SỬA LỖI:
 Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedCueCount}/${expectedCueCount} cue theo đúng thứ tự. Không gộp, không tách, không bỏ sót cue.`;
           last = await callAIWithModelFallback(prompt, orderedKeys, selectedModel, 0);
           if (!last.result) continue;
-          const returned = parseSrtCues(last.result).length;
-          console.log(`[Gemini AI] Kiểm tra ${label}: nguồn=${expectedCueCount}, dịch=${returned}, attempt=${attempt}`);
-          if (returned === expectedCueCount) return last.result.trim();
+          const validation = validateCueStructure(sourceChunk, last.result, label);
+          const returned = validation.translatedCues.length;
+          console.log(`[Gemini AI] Kiểm tra ${label}: nguồn=${expectedCueCount}, dịch=${returned}, timestamp=${validation.ok ? 'OK' : 'MISMATCH'}, attempt=${attempt}`);
+          if (validation.ok) return last.result.trim();
         }
         const returned = last?.result ? parseSrtCues(last.result).length : 0;
         if (last?.result && returned !== expectedCueCount) {
@@ -2210,7 +2250,8 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
         const expectedCueCount = parseSrtCues(sourceChunk).length;
         const primaryIndex = Math.max(0, workerKeys.indexOf(workerKey));
         const orderedKeys = workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex));
-        console.log(`⏳ [Gemini AI] Đang dịch chunk ${i + 1}/${chunks.length} | ${expectedCueCount} cue | worker-key=${primaryIndex + 1}`);
+        const keyHint = `${String(workerKey).slice(0, 4)}…${String(workerKey).slice(-4)}`;
+        console.log(`⏳ [Gemini AI] Đang dịch chunk ${i + 1}/${chunks.length} | ${expectedCueCount} cue | worker-key=${primaryIndex + 1} | key=${keyHint}`);
 
         try {
           const result = await translateOneValidated(sourceChunk, `chunk ${i + 1}/${chunks.length}`, orderedKeys, expectedCueCount);
@@ -2220,7 +2261,7 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
         } catch (firstErr) {
           console.warn(`⚠️ [Gemini AI] Chunk ${i + 1}/${chunks.length} lỗi cue; kích hoạt repair cascade: ${firstErr.message}`);
 
-          // v3.9.44: do not fail a whole 100-cue chunk because Gemini dropped
+          // v3.9.45: do not fail a whole 100-cue chunk because Gemini dropped
           // one or two cues. Retry only the problematic piece, then recursively
           // reduce the cue size. This keeps the normal path fast while making
           // pathological cue-dense sections progressively easier for Gemini.
@@ -2280,8 +2321,14 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
       // With 3 keys: worker #1 -> chunks 0,3,6...; #2 -> 1,4,7...;
       // #3 -> 2,5,8... . Each key has its own limiter and queue.
       const workerKeys = geminiKeys.slice(0, 3);
+      // v3.9.45: dynamic work-stealing. A fast key immediately takes the next
+      // chunk instead of waiting for a slower fixed-assignment worker. This keeps
+      // all independent projects busy without increasing per-key RPM/queue limits.
+      let nextChunkIndex = 0;
       const worker = async (workerIndex, workerKey) => {
-        for (let i = workerIndex; i < chunks.length; i += workerKeys.length) {
+        while (true) {
+          const i = nextChunkIndex++;
+          if (i >= chunks.length) return;
           await translateChunk(i, workerKey);
         }
       };
