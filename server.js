@@ -139,7 +139,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.38',
+  version: '3.9.40',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -151,7 +151,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.38', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.40', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -458,7 +458,7 @@ async function fetchSubsourceSubtitleText(subtitleId, apiKey) {
 }
 
 function splitSrtIntoChunks(srt, maxChars = 14000) {
-  // v3.9.38 speed optimization: use larger chunks so each subtitle needs fewer
+  // v3.9.40 speed optimization: use larger chunks so each subtitle needs fewer
   // Gemini request cycles. Never split a subtitle block in the middle.
   // With the existing 3-key / 8s-per-key limiter, fewer requests is much
   // more important for Stremio/Nuvio latency than making tiny chunks.
@@ -941,7 +941,7 @@ async function handleSubtitles(req, res, encodedConfig) {
   //
   // Bump this constant only when intentionally invalidating old client-side
   // subtitle URLs after a future protocol/response change.
-  const aiUrlVersion = '3.9.38';
+  const aiUrlVersion = '3.9.40';
 
   let nativeVietSubtitles = [];
   let englishOriginalSubtitles = [];
@@ -1501,7 +1501,7 @@ app.get('/ai-test', async (req, res) => {
 // In-memory translation cache. This is especially useful on Android/Android TV,
 // where a slow subtitle URL may be requested more than once. Completed results
 // are reused immediately on later subtitle requests.
-// v3.9.38: cache the character/relationship guide per show+model so later
+// v3.9.40: cache the character/relationship guide per show+model so later
 // episodes do not pay the extra Gemini guide-generation request again.
 const characterGuideCache = new Map();
 const CHARACTER_GUIDE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -1511,7 +1511,7 @@ const TRANSLATION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TRANSLATION_CACHE_MAX = 40;
 const translationInFlight = new Map();
 
-// v3.9.38: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
+// v3.9.40: stale subtitle URL gate. Nuvio can keep an old subtitle URL from a
 // previous episode and request it again when a new episode opens. Old URLs must
 // not start Gemini or return the temporary status subtitle.
 const subtitleActivation = new Map();
@@ -1573,7 +1573,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.38',
+    'v3.9.39',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -1689,7 +1689,7 @@ function writeLiveStatus(res, state, force = false) {
 
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target, gate } = req.query;
-  // v3.9.38 diagnostic: capture the client request fingerprint so we can verify
+  // v3.9.40 diagnostic: capture the client request fingerprint so we can verify
   // whether Nuvio sends different headers for preload vs manual subtitle select.
   // Do NOT log query strings/config/API keys.
   console.log('[translate-sub headers]', JSON.stringify({
@@ -2006,7 +2006,7 @@ app.get('/translate-sub', async (req, res) => {
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
       const workerCount = Math.max(1, Math.min(3, geminiKeys.length));
-      // v3.9.38: keep the faster 14k chunks and 4.5s per-key spacing.
+      // v3.9.40: keep the faster 14k chunks and 4.5s per-key spacing.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
       console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk 14k | key interval 4.5s | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
@@ -2020,9 +2020,12 @@ app.get('/translate-sub', async (req, res) => {
         const progressLabel = `${i + 1}/${chunks.length}`;
         console.log(`⏳ [Gemini AI] Đang dịch chunk ${progressLabel} | worker-key=${workerKeys.indexOf(workerKey) + 1}`);
 
-        const sourceChunk = chunks[i];
-        const expectedCueCount = parseSrtCues(sourceChunk).length;
-        const basePrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
+        const primaryIndex = workerKeys.indexOf(workerKey);
+        const orderedKeys = primaryIndex >= 0
+          ? workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex))
+          : workerKeys;
+
+        const buildTranslationPrompt = (sourceChunk, expectedCueCount, repair = false) => `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
 MỤC TIÊU:
 Dịch đoạn SRT tiếng Anh dưới đây sang tiếng Việt tự nhiên, đúng sắc thái và đúng bối cảnh. ${contextGuide}
@@ -2044,57 +2047,77 @@ NGUYÊN TẮC XƯNG HÔ:
 - Không được thay đổi, làm tròn, nối hoặc suy đoán timestamp.
 - Chỉ dịch phần text của từng cue.
 - Chỉ trả về SRT đã dịch, không markdown, không giải thích.
+${repair ? `
+CẢNH BÁO SỬA LỖI:
+Lần trả lời trước đã làm mất hoặc gộp cue. Lần này bắt buộc khôi phục đủ ${expectedCueCount}/${expectedCueCount} cue. Không được bỏ bất kỳ cue nào. Kiểm tra số cue trước khi trả lời.` : ''}
 
 SRT CẦN DỊCH:
 ${sourceChunk}`;
 
-        const primaryIndex = workerKeys.indexOf(workerKey);
-        const orderedKeys = primaryIndex >= 0
-          ? workerKeys.slice(primaryIndex).concat(workerKeys.slice(0, primaryIndex))
-          : workerKeys;
-
-        let aiRes = null;
-        let accepted = false;
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          const prompt = attempt === 1
-            ? basePrompt
-            : `${basePrompt}
-
-CẢNH BÁO SỬA LỖI:
-Lần trả lời trước đã làm mất hoặc gộp cue. Lần này bắt buộc khôi phục đủ ${expectedCueCount}/${expectedCueCount} cue. Không được bỏ bất kỳ cue nào. Kiểm tra số cue trước khi trả lời.`;
-          aiRes = await callAIWithModelFallback(prompt, orderedKeys, selectedModel, 0);
-          if (!aiRes.result) {
-            if (attempt === 2) throw new Error(`Gemini không dịch được đoạn ${i + 1}/${chunks.length}: ${aiRes.error || 'không có phản hồi'}`);
-            continue;
+        const translateValidated = async (sourceChunk, label, maxAttempts = 2) => {
+          const expectedCueCount = parseSrtCues(sourceChunk).length;
+          let aiRes = null;
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const prompt = buildTranslationPrompt(sourceChunk, expectedCueCount, attempt > 1);
+            aiRes = await callAIWithModelFallback(prompt, orderedKeys, selectedModel, 0);
+            if (!aiRes.result) {
+              if (attempt === maxAttempts) throw new Error(`Gemini không dịch được ${label}: ${aiRes.error || 'không có phản hồi'}`);
+              continue;
+            }
+            const returnedCueCount = parseSrtCues(aiRes.result).length;
+            console.log(`[Gemini AI] Kiểm tra ${label}: nguồn=${expectedCueCount}, dịch=${returnedCueCount}, attempt=${attempt}`);
+            if (returnedCueCount === expectedCueCount) {
+              return aiRes.result.trim();
+            }
+            if (attempt < maxAttempts) {
+              console.warn(`[Gemini AI] ${label} lệch cue (${expectedCueCount} → ${returnedCueCount}), retry repair.`);
+            }
           }
-          const returnedCueCount = parseSrtCues(aiRes.result).length;
-          console.log(`[Gemini AI] Kiểm tra chunk ${i + 1}/${chunks.length}: nguồn=${expectedCueCount}, dịch=${returnedCueCount}, attempt=${attempt}`);
-          if (returnedCueCount === expectedCueCount) { accepted = true; break; }
-          if (attempt === 1) console.warn(`[Gemini AI] Chunk ${i + 1}/${chunks.length} lệch cue (${expectedCueCount} → ${returnedCueCount}), retry repair.`);
-        }
-        if (!accepted || !aiRes?.result) {
           const returned = aiRes?.result ? parseSrtCues(aiRes.result).length : 0;
-          throw new Error(`Chunk ${i + 1}: số cue không khớp sau retry (nguồn=${expectedCueCount}, dịch=${returned})`);
+          throw new Error(`${label}: số cue không khớp sau retry (nguồn=${expectedCueCount}, dịch=${returned})`);
+        };
+
+        const sourceChunk = chunks[i];
+        let translatedText;
+        try {
+          // Fast path: keep the requested 14k chunk size.
+          translatedText = await translateValidated(sourceChunk, `chunk ${progressLabel}`);
+        } catch (firstError) {
+          // Gemini can occasionally merge/drop cues when a 14k chunk contains a
+          // very high cue density. Do NOT reduce the normal 14k chunk size.
+          // Only the problematic chunk is adaptively split into smaller SRT-safe
+          // pieces and retried. This preserves speed for normal subtitles while
+          // preventing a single bad chunk from killing the whole translation job.
+          const sourceCueCount = parseSrtCues(sourceChunk).length;
+          if (sourceCueCount < 150) throw firstError;
+
+          const repairChunks = splitSrtIntoChunks(sourceChunk, 7000);
+          if (repairChunks.length < 2) throw firstError;
+          console.warn(`⚠️ [Gemini AI] ${progressLabel} thất bại (${firstError.message}); adaptive repair: ${repairChunks.length} sub-chunk x ~7k để bảo toàn ${sourceCueCount} cue.`);
+
+          const repaired = [];
+          for (let r = 0; r < repairChunks.length; r++) {
+            const subLabel = `chunk ${progressLabel} repair ${r + 1}/${repairChunks.length}`;
+            repaired.push(await translateValidated(repairChunks[r], subLabel, 2));
+          }
+          translatedText = repaired.join('\n\n');
+          const repairedCueCount = parseSrtCues(translatedText).length;
+          if (repairedCueCount !== sourceCueCount) {
+            throw new Error(`Adaptive repair vẫn lệch cue: nguồn=${sourceCueCount}, dịch=${repairedCueCount}`);
+          }
+          console.log(`🛠️ [Gemini AI] Adaptive repair thành công ${progressLabel}: ${sourceCueCount}/${repairedCueCount} cue.`);
         }
 
         translated.push({
           index: i,
-          text: aiRes.result.trim()
+          text: translatedText
         });
 
         statusState.done = translated.length;
-        statusState.fallback = (aiRes.model && aiRes.model !== selectedModel)
-          ? `Chunk ${i + 1}/${chunks.length} chuyển sang ${aiRes.model}.`
-          : '';
-
         const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
         const done = translated.length;
         const percent = Math.round((done / chunks.length) * 100);
-        console.log(`✅ [Gemini AI] Xong chunk ${progressLabel} | model=${aiRes.model || selectedModel} | ${elapsed}s | tiến độ ${done}/${chunks.length} (${percent}%)`);
-
-        if (aiRes.model && aiRes.model !== selectedModel) {
-          console.warn(`🔁 [Gemini AI] Chunk ${progressLabel} đã fallback từ ${selectedModel} → ${aiRes.model}`);
-        }
+        console.log(`✅ [Gemini AI] Xong chunk ${progressLabel} | ${elapsed}s | tiến độ ${done}/${chunks.length} (${percent}%)`);
       };
 
       // One worker per independent Google project/key.
@@ -2169,7 +2192,7 @@ Lần trả lời trước đã làm mất hoặc gộp cue. Lần này bắt bu
     const statusMessage =
       `🟡 Gemini AI đang dịch phụ đề...\n` +
       `⏱️ Dự kiến ${mediaLabel}: khoảng ${expectedTime}\n` +
-      `⚡ Đã tối ưu 3 luồng Gemini song song + chunk 14.000\n` +
+      `⚡ Đã tối ưu 3 luồng Gemini song song để tăng tốc dịch\n` +
       `🔄 Khi dịch xong, bấm Reload phụ đề để nhận bản Việt.`;
     return res.send(makeStatusSrt(statusMessage, 3600));
   } catch (err) {
