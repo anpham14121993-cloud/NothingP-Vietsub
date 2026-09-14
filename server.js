@@ -1,4 +1,4 @@
-// NothingP AIOsubtitles v3.9.52 — Turbo: 20K/180 + parallel per-key + hard 15 RPM/key + overlap
+// NothingP AIOsubtitles v3.9.54 — Turbo: 20K/180 + parallel per-key + hard 15 RPM/key + overlap
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -79,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.52</h2>
+<h2>NothingP AIOsubtitles v3.9.54</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -140,7 +140,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.52',
+  version: '3.9.54',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -152,7 +152,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.52', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.54', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -516,7 +516,7 @@ function cleanAndRebuildSrt(srtText) {
 }
 
 // Each API key has an independent rolling 15-RPM budget.
-// v3.9.52: quota reservation is serialized, but the actual Gemini HTTP calls
+// v3.9.54: quota reservation is serialized, but the actual Gemini HTTP calls
 // on the SAME key are NOT serialized. This lets one key consume its available
 // 15-request rolling budget as fast as the API responds, while never starting
 // request #16 inside the same rolling 60-second window.
@@ -1650,7 +1650,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.48',
+    'v3.9.54',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -2084,11 +2084,13 @@ app.get('/translate-sub', async (req, res) => {
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
-      const workerCount = Math.max(1, Math.min(3, geminiKeys.length));
-      // v3.9.52: keep 20k/180-cue chunks; up to 5 workers/key; hard 15 RPM/key and 45 RPM total quotas remain; same-key requests may run concurrently after quota reservation.
+      const baseWorkerKeysForLog = geminiKeys.slice(0, 3);
+      const maxWorkersPerKeyForLog = 5;
+      const maxWorkerCountForLog = Math.max(1, baseWorkerKeysForLog.length * maxWorkersPerKeyForLog);
+      // v3.9.54: keep 20k/180-cue chunks; up to 5 workers/key; hard 15 RPM/key and 45 RPM total quotas remain; same-key requests may run concurrently after quota reservation.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
-      console.log(`📦 [Gemini AI] Chia thành ${chunks.length} chunk | ${workerCount} worker | chunk <=20k / <=180 cue | parallel per-key quota | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
+      console.log(`📦 [Gemini AI] Đang sử dụng cơ chế dịch đa luồng Gemini | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
 
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
@@ -2314,8 +2316,11 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
               const results = [];
               for (let subIndex = 0; subIndex < smaller.length; subIndex++) {
                 const subPiece = smaller[subIndex];
-                const startKey = (primaryIndex + depth + subIndex) % Math.max(1, workerKeys.length);
-                const subKeys = workerKeys.slice(startKey).concat(workerKeys.slice(0, startKey));
+                // Rotate only within the key list passed to this cascade level.
+                // Do not reference translateChunk-local variables here: the
+                // cascade is intentionally self-contained and recursive.
+                const startKey = (depth + subIndex) % Math.max(1, keys.length);
+                const subKeys = keys.slice(startKey).concat(keys.slice(0, startKey));
                 const text = await translateCascade(subPiece, `${label}.${subIndex + 1}`, subKeys, depth + 1, chunkIndex);
                 results.push({ index: subIndex, text });
               }
@@ -2341,15 +2346,18 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
         }
       };
 
-      // v3.9.52: use up to 5 concurrent workers PER key. With 3 keys this
+      // v3.9.54: use up to 5 concurrent workers PER key. With 3 keys this
       // gives up to 15 active workers, while the rolling limiter still hard-caps
       // each individual key at 15 request starts per 60 seconds.
       const baseWorkerKeys = geminiKeys.slice(0, 3);
       const WORKERS_PER_KEY = 5;
       const workerSlots = [];
       const workerKeyIndexes = [];
-      for (let keyIndex = 0; keyIndex < baseWorkerKeys.length; keyIndex++) {
-        for (let slot = 0; slot < WORKERS_PER_KEY; slot++) {
+      // Round-robin the slots across keys. This is important when a job has
+      // only a few chunks: chunk 1/2/3 should immediately use key 1/2/3,
+      // rather than filling all slots belonging to key 1 first.
+      for (let slot = 0; slot < WORKERS_PER_KEY; slot++) {
+        for (let keyIndex = 0; keyIndex < baseWorkerKeys.length; keyIndex++) {
           workerSlots.push(baseWorkerKeys[keyIndex]);
           workerKeyIndexes.push(keyIndex);
         }
@@ -2434,7 +2442,7 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
     const statusMessage =
       `🟡 Gemini AI đang dịch phụ đề...\n` +
       `⏱️ Dự kiến ${mediaLabel}: khoảng ${expectedTime}\n` +
-      `⚡ Đã tối ưu 3 luồng Gemini song song\n` +
+      `⚡ Đã tối ưu ${Math.min(3, geminiKeys.length)} key Gemini song song, tối đa 5 request/key\n` +
       `🔄 Khi dịch xong, bấm Reload phụ đề để nhận bản Việt.`;
     return res.send(makeStatusSrt(statusMessage, 3600));
   } catch (err) {
