@@ -1,4 +1,4 @@
-// NothingP AIOsubtitles v3.9.54 — Turbo: 20K/180 + parallel per-key + hard 15 RPM/key + overlap
+// NothingP AIOsubtitles v3.9.55 — Turbo: 20K/150 + parallel per-key + hard 15 RPM/key + overlap
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -79,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.54</h2>
+<h2>NothingP AIOsubtitles v3.9.55</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -140,7 +140,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.54',
+  version: '3.9.55',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -152,7 +152,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.54', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.55', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -516,7 +516,7 @@ function cleanAndRebuildSrt(srtText) {
 }
 
 // Each API key has an independent rolling 15-RPM budget.
-// v3.9.54: quota reservation is serialized, but the actual Gemini HTTP calls
+// v3.9.55: quota reservation is serialized, but the actual Gemini HTTP calls
 // on the SAME key are NOT serialized. This lets one key consume its available
 // 15-request rolling budget as fast as the API responds, while never starting
 // request #16 inside the same rolling 60-second window.
@@ -1650,7 +1650,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.54',
+    'v3.9.55',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -2079,7 +2079,7 @@ app.get('/translate-sub', async (req, res) => {
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
   - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
-      const chunks = splitSrtIntoChunks(originalSrt, 20000, 180);
+      const chunks = splitSrtIntoChunks(originalSrt, 20000, 150);
       const translated = [];
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
@@ -2087,10 +2087,10 @@ app.get('/translate-sub', async (req, res) => {
       const baseWorkerKeysForLog = geminiKeys.slice(0, 3);
       const maxWorkersPerKeyForLog = 5;
       const maxWorkerCountForLog = Math.max(1, baseWorkerKeysForLog.length * maxWorkersPerKeyForLog);
-      // v3.9.54: keep 20k/180-cue chunks; up to 5 workers/key; hard 15 RPM/key and 45 RPM total quotas remain; same-key requests may run concurrently after quota reservation.
+      // v3.9.55: keep 20k/150-cue chunks; up to 5 workers/key; hard 15 RPM/key and 45 RPM total quotas remain; same-key requests may run concurrently after quota reservation.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
-      console.log(`📦 [Gemini AI] Đang sử dụng cơ chế dịch đa luồng Gemini | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
+      console.log(`📦 [Gemini AI] Đang sử dụng cơ chế đa luồng dịch phụ đề | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
 
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
@@ -2346,7 +2346,7 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
         }
       };
 
-      // v3.9.54: use up to 5 concurrent workers PER key. With 3 keys this
+      // v3.9.55: use up to 5 concurrent workers PER key. With 3 keys this
       // gives up to 15 active workers, while the rolling limiter still hard-caps
       // each individual key at 15 request starts per 60 seconds.
       const baseWorkerKeys = geminiKeys.slice(0, 3);
@@ -2442,7 +2442,7 @@ Lần trước số cue không khớp. Bắt buộc trả về đủ ${expectedC
     const statusMessage =
       `🟡 Gemini AI đang dịch phụ đề...\n` +
       `⏱️ Dự kiến ${mediaLabel}: khoảng ${expectedTime}\n` +
-      `⚡ Đã tối ưu ${Math.min(3, geminiKeys.length)} key Gemini song song, tối đa 5 request/key\n` +
+      `⚡ Đang sử dụng cơ chế đa luồng dịch phụ đề\n` +
       `🔄 Khi dịch xong, bấm Reload phụ đề để nhận bản Việt.`;
     return res.send(makeStatusSrt(statusMessage, 3600));
   } catch (err) {
