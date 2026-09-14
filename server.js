@@ -78,7 +78,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.27</h2>
+<h2>NothingP AIOsubtitles v3.9.30</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -125,7 +125,8 @@ document.getElementById('addonUrlOutput').value = getAddonUrl();
 </html>`);
 }
 
-// v3.9.27: deterministic provider order for the configuration page.
+// v3.9.31: Android TV subtitle playback + click-trigger translation fix.
+// v3.9.30: deterministic provider order for the configuration page.
 // This is separate from the subtitle-picker order.
 const CONFIG_PROVIDER_ORDER = ['os', 'subsource', 'subdl'];
 const configProviderRank = value => {
@@ -137,7 +138,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.27',
+  version: '3.9.31',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -149,7 +150,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.27', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.31', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -180,8 +181,166 @@ function isEnglish(value) {
   return code === 'en' || code === 'eng' || code === 'english';
 }
 
+
+// v3.9.31: Android TV / Media3-safe SRT normalization.
+// Gemini is allowed to translate text only; timestamps are taken from the
+// original subtitle and validated again before the final file is returned.
+function normalizeSrtForPlayback(input) {
+  const raw = String(input || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  const blocks = raw.split(/\n{2,}/);
+  const cues = [];
+
+  const toMs = (s) => {
+    const m = String(s).trim().match(/^(\d{1,3}):(\d{2}):(\d{2})[,.](\d{1,3})$/);
+    if (!m) return null;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    const sec = Number(m[3]);
+    let ms = String(m[4]);
+    if (ms.length === 1) ms += '00';
+    else if (ms.length === 2) ms += '0';
+    ms = Number(ms);
+    if (min > 59 || sec > 59 || ms > 999) return null;
+    return (((h * 60 + min) * 60 + sec) * 1000) + ms;
+  };
+
+  const fromMs = (ms) => {
+    ms = Math.max(0, Math.round(ms));
+    const h = Math.floor(ms / 3600000);
+    ms %= 3600000;
+    const min = Math.floor(ms / 60000);
+    ms %= 60000;
+    const sec = Math.floor(ms / 1000);
+    const milli = ms % 1000;
+    return `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}:${String(sec).padStart(2,'0')},${String(milli).padStart(3,'0')}`;
+  };
+
+  for (const block of blocks) {
+    const lines = block.split('\n');
+    if (lines.length < 2) continue;
+
+    let timeIndex = lines.findIndex(line =>
+      /^\s*\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}(?:\s+.*)?\s*$/.test(line)
+    );
+    if (timeIndex < 0) continue;
+
+    const tm = lines[timeIndex].match(
+      /^\s*(\d{1,3}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,3}:\d{2}:\d{2}[,.]\d{1,3})/
+    );
+    if (!tm) continue;
+
+    const start = toMs(tm[1]);
+    const end = toMs(tm[2]);
+    if (start == null || end == null || end <= start) continue;
+
+    const body = lines.slice(timeIndex + 1)
+      .join('\n')
+      .replace(/```(?:srt|subtitle|text)?/gi, '')
+      .replace(/```/g, '')
+      .trim();
+
+    if (!body) continue;
+
+    cues.push({ start, end, body });
+  }
+
+  cues.sort((a, b) => a.start - b.start || a.end - b.end);
+
+  // Deduplicate exact timestamp/text duplicates, which can otherwise make
+  // some TV subtitle renderers discard a following cue.
+  const seen = new Set();
+  const unique = [];
+  for (const cue of cues) {
+    const key = `${cue.start}|${cue.end}|${cue.body}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(cue);
+  }
+
+  return unique.map((cue, i) =>
+    `${i + 1}\n${fromMs(cue.start)} --> ${fromMs(cue.end)}\n${cue.body}`
+  ).join('\n\n') + (unique.length ? '\n' : '');
+}
+
 function subtitleName(sub, fallback) {
-  return sub?.releaseName || sub?.release_name || sub?.fileName || sub?.file_name || sub?.name || fallback;
+  // v3.9.30: Resolve the actual release name exposed by each provider.
+  // Different APIs use different field names/casing, so keep all known variants
+  // before falling back to the subtitle filename/name.
+  const candidates = [
+    sub?.releaseName,
+    sub?.release_name,
+    sub?.release,
+    sub?.releaseInfo,
+    sub?.release_info,
+    sub?.attributes?.releaseName,
+    sub?.attributes?.release_name,
+    sub?.attributes?.release,
+    sub?.fileName,
+    sub?.file_name,
+    sub?.name
+  ];
+
+  for (const value of candidates) {
+    if (Array.isArray(value)) {
+      const joined = value
+        .map(v => typeof v === 'object' ? (v?.name || v?.title || v?.value || '') : String(v || ''))
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      if (joined) return joined;
+      continue;
+    }
+
+    if (value && typeof value === 'object') {
+      const nested = value.name || value.title || value.value || value.releaseName || value.release_name;
+      if (nested) return String(nested).trim();
+      continue;
+    }
+
+    const result = String(value || '').trim();
+    if (result) return result;
+  }
+
+  return String(fallback || '').trim();
+}
+
+function subtitlePickerId(releaseName, fallback) {
+  // Nuvio/Stremio clients commonly render the subtitle object's `id` as the
+  // small identifier line in the picker. Keep the real release name here.
+  return String(releaseName || fallback || 'Subtitle').trim();
+}
+
+function subtitleDisplayName(releaseName, language, provider) {
+  // v3.9.30: show language + subtitle source + the real release name.
+  // Example: 🇻🇳 OpenSubtitles WEB-DL 1080p
+  const name = String(releaseName || 'Subtitle')
+    .replace(/\\s+/g, ' ')
+    .trim();
+
+  const code = languageCode(language);
+  const flag = code === 'vi' || code === 'vie' || code === 'vietnamese'
+    ? '🇻🇳'
+    : (code === 'en' || code === 'eng' || code === 'english' ? '🇬🇧' : '');
+
+  const providerNames = {
+    os: 'OpenSubtitles',
+    opensubtitles: 'OpenSubtitles',
+    subsource: 'SubSource',
+    subdl: 'SubDL'
+  };
+  const source = providerNames[String(provider || '').toLowerCase()]
+    || String(provider || '').trim();
+
+  const parts = [];
+  if (flag) parts.push(flag);
+  if (source) parts.push(source);
+  if (name) parts.push(name);
+
+  return parts.length ? parts.join(' • ') : 'Subtitle';
 }
 
 function extractSubtitleText(buffer) {
@@ -738,7 +897,7 @@ async function handleSubtitles(req, res, encodedConfig) {
 
   // SAME-TRACK MODE:
   // Keep one stable Gemini subtitle URL for the lifetime of this subtitle track.
-  // Request #1 returns the temporary "đang dịch..." SRT and starts the background job.
+  // The click request returns one temporary status SRT and starts the background job.
   // After Gemini finishes, a later request to THIS SAME URL returns the cached
   // Vietnamese SRT. Do not use Date.now() here: regenerating the URL on every
   // /subtitles request creates a new client-side resource identity.
@@ -794,7 +953,17 @@ async function handleSubtitles(req, res, encodedConfig) {
         const lang = item.attributes?.language || '';
         if (!file?.file_id) return null;
 
-        const releaseName = item.attributes?.release || file.file_name || 'OpenSubtitles Sub';
+        const releaseName = subtitleName(
+          {
+            releaseName: item.attributes?.releaseName,
+            release_name: item.attributes?.release_name,
+            release: item.attributes?.release,
+            fileName: file.file_name,
+            name: item.attributes?.name
+          },
+          'OpenSubtitles Sub'
+        );
+        const pickerId = subtitlePickerId(releaseName, `os-${item.id}`);
         const isVi = isVietnamese(lang);
 
         // IMPORTANT: defer the authenticated OpenSubtitles /download call
@@ -805,21 +974,24 @@ async function handleSubtitles(req, res, encodedConfig) {
           `&config=${encodeURIComponent(encodedConfig || '')}`;
         if (isVi) {
           return {
-            id: `os-vi-${item.id}`,
+            id: pickerId,
             url: sourceUrl,
             lang: 'vie',
-            name: `🇻🇳 [Tiếng Việt] ${releaseName}`
+            name: subtitleDisplayName(releaseName, 'vie', 'os')
           };
         }
 
-        // IMPORTANT: The English track itself is the trigger for Gemini.
-        // Stremio only requests this URL after the user selects the English subtitle.
+        // MANUAL-SELECT ONLY: This entry is intentionally advertised as English.
+        // The addon does NOT fetch /translate-sub while building /subtitles.
+        // Gemini starts only if the client actually requests this URL.
+        // Keep lang='eng' so Vietnamese auto-subtitle preferences do not treat
+        // this Gemini trigger as a Vietnamese/native subtitle.
         const aiUrl = `${hostUrl}/translate-sub?provider=os&fileId=${encodeURIComponent(file.file_id)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
         return {
-          id: `os-en-${item.id}`,
+          id: pickerId,
           url: aiUrl,
           lang: 'eng',
-          name: `🇻🇳 -GEMINI AI ${releaseName}`
+          name: subtitleDisplayName(releaseName, 'eng', 'os')
         };
       }));
 
@@ -904,25 +1076,27 @@ async function handleSubtitles(req, res, encodedConfig) {
         const dlUrl = rawUrl.startsWith('http') ? rawUrl : `https://dl.subdl.com${rawUrl}`;
         const releaseName = subtitleName(sub, 'SubDL Sub');
         const idPart = sub.file_n_id || sub.n_id || sub.nId || sub.id || Math.random().toString(36).slice(2);
+        const pickerId = subtitlePickerId(releaseName, `subdl-${idPart}`);
 
         const sourceUrl =
           `${hostUrl}/proxy-subdl?url=${encodeURIComponent(dlUrl)}` +
           `&config=${encodeURIComponent(encodedConfig || '')}`;
         if (vi && isVietnamese(lang)) {
           native.push({
-            id: `subdl-vi-${idPart}`,
+            id: pickerId,
             url: sourceUrl,
             lang: 'vie',
-            name: `🇻🇳 [Tiếng Việt] ${releaseName}`
+            name: subtitleDisplayName(releaseName, 'vie', 'subdl')
           });
         } else if (!vi && isEnglish(lang)) {
-          // Selecting the English subtitle triggers EN -> VI translation.
+          // MANUAL-SELECT ONLY: Selecting this English entry triggers EN -> VI.
+          // Never call this URL from subtitle discovery.
           const aiUrl = `${hostUrl}/translate-sub?provider=subdl&sourceUrl=${encodeURIComponent(dlUrl)}&model=${encodeURIComponent(modelToUse)}&config=${encodeURIComponent(encodedConfig || '')}&imdbId=${encodeURIComponent(imdbId)}&type=${type}&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
           englishOriginalSubtitles.push({
-            id: `subdl-en-${idPart}`,
+            id: pickerId,
             url: aiUrl,
             lang: 'eng',
-            name: `🇻🇳 -GEMINI AI ${releaseName}`
+            name: subtitleDisplayName(releaseName, 'eng', 'subdl')
           });
         }
       }
@@ -1007,9 +1181,11 @@ async function handleSubtitles(req, res, encodedConfig) {
         const sub = item.sub;
         const isViSelected = item.vi;
         if (!sub.subtitleId) continue;
-        const releaseName = Array.isArray(sub.releaseInfo)
-          ? sub.releaseInfo.join(' ')
-          : (sub.releaseInfo || sub.productionType || 'SubSource');
+        const releaseName = subtitleName(
+          sub,
+          sub.productionType || 'SubSource'
+        );
+        const pickerId = subtitlePickerId(releaseName, `subsource-${sub.subtitleId}`);
         const downloadUrl =
           `${hostUrl}/subsource-sub/${encodeURIComponent(sub.subtitleId)}` +
           `?config=${encodeURIComponent(encodedConfig || '')}`;
@@ -1017,10 +1193,10 @@ async function handleSubtitles(req, res, encodedConfig) {
 
         if (isViSelected && isVietnamese(subLanguage)) {
           native.push({
-            id: `subsource-vi-${sub.subtitleId}`,
+            id: pickerId,
             url: downloadUrl,
             lang: 'vie',
-            name: `🇻🇳 [Tiếng Việt] ${releaseName}`
+            name: subtitleDisplayName(releaseName, 'vie', 'subsource')
           });
         } else if (!isViSelected && isEnglish(subLanguage)) {
           const aiUrl =
@@ -1031,12 +1207,13 @@ async function handleSubtitles(req, res, encodedConfig) {
             `&imdbId=${encodeURIComponent(imdbId)}` +
             `&type=${encodeURIComponent(type)}` +
             `&season=${season || ''}&episode=${episode || ''}&source=en&target=vi&v=${aiUrlVersion}`;
-          // Selecting the English subtitle triggers EN -> VI translation.
+          // MANUAL-SELECT ONLY: Selecting this English entry triggers EN -> VI.
+          // Never call this URL from subtitle discovery.
           englishOriginalSubtitles.push({
-            id: `subsource-en-${sub.subtitleId}`,
+            id: pickerId,
             url: aiUrl,
             lang: 'eng',
-            name: `🇻🇳 -GEMINI AI ${releaseName}`
+            name: subtitleDisplayName(releaseName, 'eng', 'subsource')
           });
         }
       }
@@ -1078,10 +1255,12 @@ async function handleSubtitles(req, res, encodedConfig) {
   // The provider fetches run in parallel, so Promise.allSettled completion/order
   // must never determine the order shown to Stremio/Nuvio.
   const providerRank = sub => {
-    const id = String(sub?.id || '').toLowerCase();
-    if (id.startsWith('os-')) return 0;
-    if (id.startsWith('subsource-')) return 1;
-    if (id.startsWith('subdl-')) return 2;
+    // v3.9.30: `id` is now the release name shown by Nuvio, so provider
+    // ordering must be derived from the URL instead of the old id prefix.
+    const url = String(sub?.url || '').toLowerCase();
+    if (url.includes('/proxy-os?') || url.includes('/translate-sub?provider=os')) return 0;
+    if (url.includes('/subsource-sub/') || url.includes('/translate-sub?provider=subsource')) return 1;
+    if (url.includes('/proxy-subdl?') || url.includes('/translate-sub?provider=subdl')) return 2;
     return 3;
   };
 
@@ -1100,7 +1279,9 @@ async function handleSubtitles(req, res, encodedConfig) {
 
   console.log('[Subtitles order]', subtitles.map(sub => ({
     id: sub?.id || '',
-    name: sub?.name || ''
+    releaseNameShown: sub?.id || '',
+    name: sub?.name || '',
+    url: sub?.url || ''
   })));
 
   res.json({ subtitles });
@@ -1353,16 +1534,18 @@ function formatEta(seconds) {
   return mm ? `${h} giờ ${mm} phút` : `${h} giờ`;
 }
 
-function makeStatusSrt(number, startMs, endMs, text) {
-  const stamp = ms => {
-    const safe = Math.max(0, Math.round(ms));
-    const hh = String(Math.floor(safe / 3600000)).padStart(2, '0');
-    const mm = String(Math.floor((safe % 3600000) / 60000)).padStart(2, '0');
-    const ss = String(Math.floor((safe % 60000) / 1000)).padStart(2, '0');
-    const mmm = String(safe % 1000).padStart(3, '0');
-    return `${hh}:${mm}:${ss},${mmm}`;
-  };
-  return `${number}\n${stamp(startMs)} --> ${stamp(endMs)}\n${text}\n\n`;
+function makeStatusSrt(message = '', durationSeconds = 30) {
+  // v3.9.33: status is created ONLY after /translate-sub is requested
+  // (i.e. after the user selects the English/Gemini subtitle). It is never
+  // generated during /subtitles discovery. The duration is supplied by the
+  // translation request flow, not by a timer running in the client.
+  const safeDuration = Math.max(5, Math.min(300, Number(durationSeconds) || 30));
+  const endMs = Math.round(safeDuration * 1000);
+  const h = String(Math.floor(endMs / 3600000)).padStart(2, '0');
+  const m = String(Math.floor((endMs % 3600000) / 60000)).padStart(2, '0');
+  const sec = String(Math.floor((endMs % 60000) / 1000)).padStart(2, '0');
+  const ms = String(endMs % 1000).padStart(3, '0');
+  return `1\n00:00:00,000 --> ${h}:${m}:${sec},${ms}\n${String(message || '').trim()}`;
 }
 
 function shiftAndAppendSrt(baseNumber, srt) {
@@ -1426,10 +1609,20 @@ function writeLiveStatus(res, state, force = false) {
 
 app.get('/translate-sub', async (req, res) => {
   const { url, provider, fileId, sourceUrl, subtitleId, model, config: configQuery, imdbId, type, season, episode, source, target } = req.query;
+  // v3.9.33 MANUAL-SELECT GATE:
+  // /translate-sub is intentionally a separate resource URL. The subtitle
+  // discovery route only advertises this URL; it never downloads the source
+  // subtitle and never calls Gemini. If a client chooses to auto-select a
+  // subtitle, the HTTP request is indistinguishable from a manual selection
+  // at server level. Therefore the addon cannot manufacture a "click" event;
+  // the reliable server-side rule is: translation starts ONLY when this
+  // endpoint is actually requested, and the AI track stays lang='eng' so it
+  // is not presented as a Vietnamese subtitle for automatic language choice.
 
-  // SAME-TRACK / TWO-REQUEST FLOW:
-  // Request #1 on the selected Gemini track -> return a temporary status SRT
-  // immediately and start translation in the background.
+
+  // v3.9.33: MANUAL-SELECTION ONLY + SAME-TRACK / TWO-REQUEST FLOW:
+  // Request #1 occurs only after the user selects the Gemini subtitle track.
+  // Return a temporary status SRT once and start translation in the background.
   // A later request to the SAME track URL -> return the cached final Vietnamese SRT.
   // No second Gemini track is created and no subtitle `lang` declaration is changed.
   // Do not stream progress through res.write(); Stremio may cache/buffer the first SRT.
@@ -1507,7 +1700,7 @@ app.get('/translate-sub', async (req, res) => {
 
         if (result) {
           console.log('[translate-sub REQUEST #2] FINAL READY FROM IN-FLIGHT JOB');
-          return res.send(result);
+          return res.send(normalizeSrtForPlayback(result));
         }
       } catch (waitErr) {
         console.error('[translate-sub REQUEST #2 wait]', waitErr.message || waitErr);
@@ -1517,17 +1710,12 @@ app.get('/translate-sub', async (req, res) => {
       const finalAfterWait = getCachedTranslation(cacheKey);
       if (finalAfterWait) {
         console.log('[translate-sub REQUEST #2] FINAL CACHE HIT AFTER WAIT');
-        return res.send(finalAfterWait);
+        return res.send(normalizeSrtForPlayback(finalAfterWait));
       }
 
-      return res.send(
-        makeStatusSrt(
-          1,
-          0,
-          30000,
-          '🟡 Gemini AI đang dịch phụ đề...\n⏱️ Đang xử lý, hãy mở lại phụ đề sau khi hoàn tất.'
-        )
-      );
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      return res.send('');
     }
 
     const jobEntry = {
@@ -1833,15 +2021,16 @@ app.get('/translate-sub', async (req, res) => {
       console.error('[translate-sub background detached]', err);
     });
 
-    // Request #1 ends immediately with a temporary, valid SRT.
-    return res.send(
-      makeStatusSrt(
-        1,
-        0,
-        30000,
-        '🟡 Gemini AI đang dịch phụ đề...\n⏱️ Dự kiến khoảng 30 giây.\n🔄 Hãy mở lại phụ đề sau khi dịch hoàn tất.'
-      )
-    );
+    // Request #1 is the click-trigger: return ONE status subtitle now while
+    // the detached Gemini job continues in the background. A later Reload
+    // requests the same URL and receives the cached final Vietnamese SRT.
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const statusMessage =
+      `🟡 Gemini AI đang dịch phụ đề...\n` +
+      `📦 Đang xử lý ngầm bằng ${selectedModel}\n` +
+      `🔄 Khi dịch xong, bấm Reload phụ đề để nhận bản Việt.`;
+    return res.send(makeStatusSrt(statusMessage, statusState.etaSeconds));
   } catch (err) {
     console.error('[translate-sub setup]', err.stack || err.message || err);
     return res.send(
