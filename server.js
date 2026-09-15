@@ -2069,8 +2069,8 @@ app.get('/translate-sub', async (req, res) => {
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
-      const baseWorkerKeysForLog = geminiKeys.slice(0, 3);
-      const maxWorkerCountForLog = Math.min(chunks.length, baseWorkerKeys.length * 2);
+      // Worker-key pool is initialized later, immediately before the worker scheduler.
+      // Do not reference baseWorkerKeys here because it is block-scoped and not initialized yet.
       // v3.9.61: keep 20k/120-cue chunks to reduce large malformed Gemini outputs. All chunks may run concurrently and
       // may share the same key; per-key in-flight=5 and the 15 request
       // starts per rolling 60 seconds for each individual key.
