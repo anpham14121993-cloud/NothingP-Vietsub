@@ -1,4 +1,4 @@
-// NothingP AIOsubtitles v3.9.61 — 20K/120 + 5 in-flight/key + 15 RPM/key + fast timeout fallback
+// NothingP AIOsubtitles v3.9.63 — 20K/120 + 5 in-flight/key + 15 RPM/key + fast timeout fallback
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -79,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.61</h2>
+<h2>NothingP AIOsubtitles v3.9.63</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -140,7 +140,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.61',
+  version: '3.9.63',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -152,7 +152,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.61', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.63', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -526,7 +526,7 @@ const GEMINI_WINDOW_MS = 60000;
 // Gemini key. The old version only limited request STARTS, so a bad chunk could
 // launch dozens of repair requests at once and overload the Node/HTTP stack.
 const GEMINI_MAX_IN_FLIGHT_PER_KEY = 5;
-// v3.9.61: do not let one stalled Gemini request hold a key slot for 60s.
+// v3.9.63: do not let one stalled Gemini request hold a key slot for 60s.
 // Timeout is treated as transient and immediately rotates to the next key.
 const GEMINI_REQUEST_TIMEOUT_MS = 30000;
 const geminiKeyState = new Map();
@@ -1633,7 +1633,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.61',
+    'v3.9.63',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -2071,7 +2071,7 @@ app.get('/translate-sub', async (req, res) => {
       // Never write to res from the background task.
       // Worker-key pool is initialized later, immediately before the worker scheduler.
       // Do not reference baseWorkerKeys here because it is block-scoped and not initialized yet.
-      // v3.9.61: keep 20k/120-cue chunks to reduce large malformed Gemini outputs. All chunks may run concurrently and
+      // v3.9.63: keep 20k/120-cue chunks to reduce large malformed Gemini outputs. All chunks may run concurrently and
       // may share the same key; per-key in-flight=5 and the 15 request
       // starts per rolling 60 seconds for each individual key.
       // The visible status message uses the requested simple movie/series estimate.
@@ -2155,41 +2155,103 @@ app.get('/translate-sub', async (req, res) => {
         return text;
       };
 
-      const repairSingleCue = async (cue, label, orderedKeys, keyIndexMap = null, chunkIndex = -1) => {
+      // v3.9.63 BATCH REPAIR:
+      // If Gemini returns N bad/missing cues, repair ALL of those cues in ONE
+      // Gemini request instead of N individual requests. This drastically reduces
+      // request count and avoids hitting per-key RPM/request limits during repair.
+      const repairFailedCuesBatch = async (cues, label, orderedKeys, keyIndexMap = null, chunkIndex = -1) => {
+        if (!Array.isArray(cues) || !cues.length) return [];
+
+        const numberedCues = cues.map((cue, index) => ({
+          repairId: index + 1,
+          cue
+        }));
+
         const repairPrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp.
 
-Dịch DUY NHẤT phần thoại của cue dưới đây sang tiếng Việt tự nhiên.
-- Chỉ dịch đúng cue này; KHÔNG dịch bất kỳ cue nào khác.
+Dịch TẤT CẢ các cue bên dưới sang tiếng Việt tự nhiên.
+- Mỗi CUE phải được dịch đúng MỘT lần.
 - Giữ nguyên đầy đủ ý nghĩa, sắc thái, tên riêng, thuật ngữ và cách xưng hô theo ngữ cảnh.
-- KHÔNG trả về số thứ tự.
+- KHÔNG dịch, gộp hoặc tách cue nào khác.
 - KHÔNG trả về timestamp.
-- KHÔNG trả về định dạng SRT.
-- KHÔNG thêm markdown, giải thích, nhận xét hay nhãn "Bản dịch:".
-- CHỈ trả về phần văn bản tiếng Việt đã dịch.
+- KHÔNG trả về số thứ tự SRT.
+- KHÔNG trả về markdown, giải thích, nhận xét hoặc nhãn "Bản dịch:".
+- Trả về JSON ARRAY hợp lệ và CHỈ JSON.
+- Mỗi phần tử phải có đúng dạng: {"id":1,"text":"bản dịch tiếng Việt"}.
+- "id" phải khớp tuyệt đối với ID cue được cung cấp.
+- Phải trả về ĐỦ ${numberedCues.length} ID, không được bỏ sót.
+- Không thêm ID ngoài danh sách.
+- Nếu cue có xuống dòng, giữ nội dung trong trường "text" bằng \\n hợp lệ JSON.
 ${contextGuide}${chunkIndex >= 0 ? buildOverlapPrompt(chunkIndex) : ''}
 
-CUE CẦN REPAIR:
-${cue.body}`;
+CÁC CUE CẦN REPAIR:
+${numberedCues.map(({ repairId, cue }) =>
+  `[CUE ${repairId}]
+${cue.body}`
+).join('\n\n')}`;
 
-        const result = await callAIWithModelFallback(repairPrompt, orderedKeys, selectedModel, 0, keyIndexMap);
+        const result = await callAIWithModelFallback(
+          repairPrompt,
+          orderedKeys,
+          selectedModel,
+          0,
+          keyIndexMap
+        );
+
         if (!result?.result) {
-          throw new Error(`${label}: không có kết quả`);
+          throw new Error(`${label}: batch repair không có kết quả`);
         }
 
-        const repairedText = extractRepairText(result.result);
-        if (!repairedText) {
-          throw new Error(`${label}: kết quả repair rỗng`);
+        const raw = stripMarkdownCodeFence(result.result);
+        let parsed;
+
+        try {
+          parsed = JSON.parse(raw);
+        } catch (err) {
+          // Fallback: accept a JSON object containing a common array field.
+          try {
+            const objectMatch = raw.match(/\{[\s\S]*\}/);
+            if (objectMatch) {
+              const obj = JSON.parse(objectMatch[0]);
+              parsed = obj.cues || obj.repairs || obj.results || obj.data;
+            }
+          } catch {}
         }
 
-        // The Worker, not Gemini, owns the cue identity/timeline.
-        // Rebuild the repaired cue from the ORIGINAL number/timestamps.
-        const repairedCue = {
-          start: cue.start,
-          end: cue.end,
-          body: repairedText
-        };
-        console.log(`🩹 [Gemini AI] ${label}: repair text-only OK | timestamp=${srtMs(cue.start)} --> ${srtMs(cue.end)}`);
-        return repairedCue;
+        if (!Array.isArray(parsed)) {
+          throw new Error(`${label}: batch repair trả về JSON không hợp lệ`);
+        }
+
+        const sourceById = new Map(numberedCues.map(item => [item.repairId, item.cue]));
+        const repairedById = new Map();
+
+        for (const item of parsed) {
+          const id = Number(item?.id);
+          const sourceCue = sourceById.get(id);
+          const repairedText = extractRepairText(item?.text);
+
+          if (!sourceCue || !repairedText || repairedById.has(id)) continue;
+
+          repairedById.set(id, {
+            start: sourceCue.start,
+            end: sourceCue.end,
+            body: repairedText
+          });
+        }
+
+        if (repairedById.size !== numberedCues.length) {
+          throw new Error(
+            `${label}: batch repair thiếu kết quả ${repairedById.size}/${numberedCues.length} cue`
+          );
+        }
+
+        const repaired = numberedCues.map(item => repairedById.get(item.repairId));
+
+        console.log(
+          `🩹 [Gemini AI] ${label}: batch repair OK ${repaired.length}/${numberedCues.length} cue | 1 request`
+        );
+
+        return repaired;
       };
 
       const mergeFailedCueRepairs = async (sourceChunk, translatedText, label, orderedKeys, keyIndexMap = null, chunkIndex = -1) => {
@@ -2200,7 +2262,7 @@ ${cue.body}`;
         const targets = getCueRepairTargets(sourceCues, translatedCues);
         if (!targets.length) return null;
 
-        console.warn(`🩹 [Gemini AI] ${label}: phát hiện ${targets.length} cue lỗi/thiếu; CHỈ repair các cue này.`);
+        console.warn(`🩹 [Gemini AI] ${label}: phát hiện ${targets.length} cue lỗi/thiếu; CHỈ batch repair các cue này trong 1 request.`);
 
         const translatedById = new Map();
         for (const cue of translatedCues) {
@@ -2210,43 +2272,14 @@ ${cue.body}`;
           }
         }
 
-        // v3.9.60: NEVER fire one Gemini request per failed cue at once.
-        // A malformed 100-cue response used to create 100 simultaneous repairs.
-        // Keep a small repair pool; per-key in-flight/RPM limits remain active too.
-        const REPAIR_CONCURRENCY = 5;
-        const repaired = new Array(targets.length);
-        let nextRepairIndex = 0;
-
-        const repairWorker = async () => {
-          while (true) {
-            const index = nextRepairIndex++;
-            if (index >= targets.length) return;
-            const cue = targets[index];
-            let lastErr = null;
-            for (let attempt = 1; attempt <= 2; attempt++) {
-              try {
-                repaired[index] = await repairSingleCue(
-                  cue,
-                  `${label} cue ${index + 1}/${targets.length}${attempt > 1 ? ` retry ${attempt}` : ''}`,
-                  orderedKeys,
-                  keyIndexMap,
-                  chunkIndex
-                );
-                lastErr = null;
-                break;
-              } catch (err) {
-                lastErr = err;
-                if (attempt < 2) await new Promise(r => setTimeout(r, 800));
-              }
-            }
-            if (lastErr) {
-              throw new Error(`${label} cue ${index + 1}/${targets.length}: ${lastErr.message || lastErr}`);
-            }
-          }
-        };
-
-        await Promise.all(
-          Array.from({ length: Math.min(REPAIR_CONCURRENCY, targets.length) }, () => repairWorker())
+        // v3.9.63: ALL failed cues are sent together in ONE Gemini request.
+        // Do not create one request per cue and do not use a concurrent repair pool.
+        const repaired = await repairFailedCuesBatch(
+          targets,
+          label,
+          orderedKeys,
+          keyIndexMap,
+          chunkIndex
         );
 
         for (const cue of repaired) {
@@ -2261,16 +2294,18 @@ ${cue.body}`;
             body: String(translated?.body || '').trim()
           };
         });
+
         if (merged.some(cue => !cue.body)) {
-          throw new Error(`${label}: vẫn còn cue chưa có nội dung sau repair`);
+          throw new Error(`${label}: vẫn còn cue chưa có nội dung sau batch repair`);
         }
 
         const result = buildSrtFromCues(merged);
         const finalCheck = validateCueStructure(sourceChunk, result, label);
         if (!finalCheck.ok) {
-          throw new Error(`${label}: repair cue vẫn sai cấu trúc: ${finalCheck.reason}`);
+          throw new Error(`${label}: batch repair vẫn sai cấu trúc: ${finalCheck.reason}`);
         }
-        console.log(`🩹 [Gemini AI] ${label}: repair đúng ${repaired.length}/${targets.length} cue lỗi.`);
+
+        console.log(`🩹 [Gemini AI] ${label}: batch repair đúng ${repaired.length}/${targets.length} cue lỗi | 1 request Gemini.`);
         return result;
       };
 
