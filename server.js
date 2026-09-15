@@ -522,13 +522,34 @@ function cleanAndRebuildSrt(srtText) {
 // next start on that key waits for the oldest start to leave the rolling window.
 const GEMINI_MAX_REQUESTS_PER_MINUTE = 15;
 const GEMINI_WINDOW_MS = 60000;
+// v3.9.60: hard cap the number of HTTP requests that can be in-flight on one
+// Gemini key. The old version only limited request STARTS, so a bad chunk could
+// launch dozens of repair requests at once and overload the Node/HTTP stack.
+const GEMINI_MAX_IN_FLIGHT_PER_KEY = 5;
 const geminiKeyState = new Map();
 
 function getGeminiKeyState(key) {
   if (!geminiKeyState.has(key)) {
-    geminiKeyState.set(key, { starts: [] });
+    geminiKeyState.set(key, { starts: [], inFlight: 0, waiters: [] });
   }
   return geminiKeyState.get(key);
+}
+
+async function acquireGeminiKeyConcurrency(key) {
+  const state = getGeminiKeyState(key);
+  if (state.inFlight < GEMINI_MAX_IN_FLIGHT_PER_KEY) {
+    state.inFlight++;
+    return;
+  }
+  await new Promise(resolve => state.waiters.push(resolve));
+  state.inFlight++;
+}
+
+function releaseGeminiKeyConcurrency(key) {
+  const state = getGeminiKeyState(key);
+  state.inFlight = Math.max(0, state.inFlight - 1);
+  const next = state.waiters.shift();
+  if (next) next();
 }
 
 function pruneRequestStarts(starts, now = Date.now()) {
@@ -553,9 +574,15 @@ async function reserveGeminiRequestSlot(key) {
 }
 
 async function withGeminiKeySlot(key, fn) {
-  await reserveGeminiRequestSlot(key);
-  // No per-key queue, no fixed delay and no in-flight concurrency cap.
-  return await fn();
+  // Acquire in-flight capacity BEFORE reserving the RPM slot. Waiting for a free
+  // connection must never consume a request-start quota slot.
+  await acquireGeminiKeyConcurrency(key);
+  try {
+    await reserveGeminiRequestSlot(key);
+    return await fn();
+  } finally {
+    releaseGeminiKeyConcurrency(key);
+  }
 }
 
 async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
@@ -2175,20 +2202,46 @@ ${cue.body}`;
           }
         }
 
-        // Repair individual cues concurrently. The existing per-key 15 RPM limiter
-        // remains the only request-start gate; no whole-chunk retranslations occur.
-        const repaired = await Promise.all(targets.map(async (cue, index) => {
-          const repairedCue = await repairSingleCue(
-            cue,
-            `${label} cue ${index + 1}/${targets.length}`,
-            orderedKeys,
-            chunkIndex
-          );
-          return repairedCue;
-        }));
+        // v3.9.60: NEVER fire one Gemini request per failed cue at once.
+        // A malformed 100-cue response used to create 100 simultaneous repairs.
+        // Keep a small repair pool; per-key in-flight/RPM limits remain active too.
+        const REPAIR_CONCURRENCY = 5;
+        const repaired = new Array(targets.length);
+        let nextRepairIndex = 0;
+
+        const repairWorker = async () => {
+          while (true) {
+            const index = nextRepairIndex++;
+            if (index >= targets.length) return;
+            const cue = targets[index];
+            let lastErr = null;
+            for (let attempt = 1; attempt <= 2; attempt++) {
+              try {
+                repaired[index] = await repairSingleCue(
+                  cue,
+                  `${label} cue ${index + 1}/${targets.length}${attempt > 1 ? ` retry ${attempt}` : ''}`,
+                  orderedKeys,
+                  chunkIndex
+                );
+                lastErr = null;
+                break;
+              } catch (err) {
+                lastErr = err;
+                if (attempt < 2) await new Promise(r => setTimeout(r, 800));
+              }
+            }
+            if (lastErr) {
+              throw new Error(`${label} cue ${index + 1}/${targets.length}: ${lastErr.message || lastErr}`);
+            }
+          }
+        };
+
+        await Promise.all(
+          Array.from({ length: Math.min(REPAIR_CONCURRENCY, targets.length) }, () => repairWorker())
+        );
 
         for (const cue of repaired) {
-          translatedById.set(cueIdentity(cue), cue);
+          if (cue) translatedById.set(cueIdentity(cue), cue);
         }
 
         const merged = sourceCues.map(source => {
@@ -2278,18 +2331,21 @@ NGUYÊN TẮC XƯNG HÔ:
 SRT CẦN DỊCH:
 ${sourceChunk}`;
 
-        const last = await callAIWithModelFallback(basePrompt, orderedKeys, selectedModel, 0);
+        let last = await callAIWithModelFallback(basePrompt, orderedKeys, selectedModel, 0);
         if (last?.result) {
-          const validation = validateCueStructure(sourceChunk, last.result, label);
+          let validation = validateCueStructure(sourceChunk, last.result, label);
           console.log(`[Gemini AI] Kiểm tra ${label}: nguồn=${expectedCueCount}, dịch=${validation.translatedCues.length}, timestamp=${validation.ok ? 'OK' : 'MISMATCH'}`);
           if (validation.ok) return last.result.trim();
 
+          // v3.9.60: CHỈ repair những cue thực sự lỗi/thiếu.
+          // Không retry lại toàn bộ chunk, dù có 1 hay nhiều cue lỗi.
+          // Cue đã OK được giữ nguyên tuyệt đối.
           const repaired = await mergeFailedCueRepairs(sourceChunk, last.result, label, orderedKeys, chunkIndex);
           if (repaired && parseSrtCues(repaired).length === expectedCueCount) {
             return repaired.trim();
           }
         }
-        throw new Error(`${label}: không thể hoàn tất sau khi chỉ repair cue lỗi`);
+        throw new Error(`${label}: không thể hoàn tất sau khi validation/retry/repair`);
       };
 
       const translateChunk = async (i, workerKey, workerIndex = 0) => {
@@ -2313,21 +2369,31 @@ ${sourceChunk}`;
       };
 
       const baseWorkerKeys = geminiKeys.slice(0, 3);
-      const activeWorkerCount = chunks.length;
+      // v3.9.60: bounded chunk workers. Two active chunks per key is enough to
+      // keep all keys busy without flooding Node when a subtitle has many chunks.
+      const activeWorkerCount = Math.min(
+        chunks.length,
+        Math.max(1, baseWorkerKeys.length * 2)
+      );
 
-      console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} chunk task | ${baseWorkerKeys.length} key | không giới hạn request đồng thời/key | hard cap 15 request starts/60s/key`);
+      console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} worker | ${chunks.length} chunk | ${baseWorkerKeys.length} key | ${GEMINI_MAX_IN_FLIGHT_PER_KEY} in-flight/key | hard cap 15 starts/60s/key`);
 
-      // v3.9.59: launch every chunk task immediately. Keys are assigned
-      // round-robin so the first 3 chunks use key 1/2/3, and later chunks may
-      // reuse those keys concurrently. There is NO worker-per-key cap.
-      // reserveGeminiRequestSlot() is the only gate and limits request STARTS
-      // to 15 per rolling 60 seconds for each key independently.
-      const chunkTasks = chunks.map((_, i) => {
-        const keyIndex = i % Math.max(1, baseWorkerKeys.length);
-        const workerKey = baseWorkerKeys[keyIndex];
-        return translateChunk(i, workerKey, keyIndex);
-      });
-      await Promise.all(chunkTasks);
+      // Pull chunks from one shared queue. This avoids launching every chunk at
+      // once and prevents a long subtitle from creating a huge Promise.all set.
+      let nextChunkIndex = 0;
+      const chunkWorker = async workerIndex => {
+        while (true) {
+          const i = nextChunkIndex++;
+          if (i >= chunks.length) return;
+          const keyIndex = workerIndex % Math.max(1, baseWorkerKeys.length);
+          const workerKey = baseWorkerKeys[keyIndex];
+          await translateChunk(i, workerKey, keyIndex);
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: activeWorkerCount }, (_, i) => chunkWorker(i))
+      );
 
       console.log(`🎉 [Gemini AI] Dịch hoàn tất ${translated.length}/${chunks.length} chunk. Đang ghép SRT...`);
 
