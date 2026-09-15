@@ -526,9 +526,9 @@ const GEMINI_WINDOW_MS = 60000;
 // Gemini key. The old version only limited request STARTS, so a bad chunk could
 // launch dozens of repair requests at once and overload the Node/HTTP stack.
 const GEMINI_MAX_IN_FLIGHT_PER_KEY = 5;
-// v3.9.63: do not let one stalled Gemini request hold a key slot for 60s.
+// v3.9.64: do not let one stalled Gemini request hold a key slot for 25s.
 // Timeout is treated as transient and immediately rotates to the next key.
-const GEMINI_REQUEST_TIMEOUT_MS = 30000;
+const GEMINI_REQUEST_TIMEOUT_MS = 25000;
 const geminiKeyState = new Map();
 
 function getGeminiKeyState(key) {
@@ -2013,7 +2013,13 @@ app.get('/translate-sub', async (req, res) => {
       // BEFORE subtitle translation. The guide is generated once per episode/job,
       // then reused by every translation chunk for consistent localization.
       // Không dùng guide của tập khác.
-      const subtitleSample = buildSubtitleContextSample(originalSrt, 4000);
+      const subtitleSample = buildSubtitleContextSample(originalSrt, 2000);
+      // v3.9.64 FAST:
+      // - 2,000-char subtitle sample instead of 4,000
+      // - 6-cue overlap instead of 12
+      // - 22K/150-cue chunks instead of 20K/120
+      // These reduce prompt tokens and Gemini round-trips without removing
+      // the Character/Relationship Guide or batch-repair safety net.
       let relationshipGuide = '';
       try {
         const guideKey = `${imdbId || 'unknown'}|S${season || 0}E${episode || 0}|${selectedModel}`;
@@ -2064,19 +2070,19 @@ app.get('/translate-sub', async (req, res) => {
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
   - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
-      const chunks = splitSrtIntoChunks(originalSrt, 20000, 120);
+      const chunks = splitSrtIntoChunks(originalSrt, 22000, 150);
       const translated = [];
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
       // Worker-key pool is initialized later, immediately before the worker scheduler.
       // Do not reference baseWorkerKeys here because it is block-scoped and not initialized yet.
-      // v3.9.63: keep 20k/120-cue chunks to reduce large malformed Gemini outputs. All chunks may run concurrently and
+      // v3.9.64: use 22k/150-cue chunks to reduce Gemini round-trips while keeping outputs manageable. All chunks may run concurrently and
       // may share the same key; per-key in-flight=5 and the 15 request
       // starts per rolling 60 seconds for each individual key.
       // The visible status message uses the requested simple movie/series estimate.
-      statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
-      console.log(`📦 [Gemini AI] Đang sử dụng cơ chế đa luồng dịch phụ đề | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
+      statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 45 : 30;
+      console.log(`📦 [Gemini AI] Đang sử dụng cơ chế đa luồng dịch phụ đề | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '45 giây' : '30 giây'}`);
 
       // Three workers use the three independent Google projects to reduce wall-clock time
       // themselves take longer than the 8s per-project request-start interval.
@@ -2331,7 +2337,7 @@ ${cue.body}`
         return { ok: true, sourceCues, translatedCues };
       };
 
-      const OVERLAP_CONTEXT_CUES = 12;
+      const OVERLAP_CONTEXT_CUES = 6;
       const getOverlapContext = (chunkIndex) => {
         if (chunkIndex <= 0) return '';
         const previousChunk = chunks[chunkIndex - 1];
@@ -2423,7 +2429,7 @@ ${sourceChunk}`;
         Math.max(1, baseWorkerKeys.length * 2)
       );
 
-      console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} worker | ${chunks.length} chunk | ${baseWorkerKeys.length} key | ${GEMINI_MAX_IN_FLIGHT_PER_KEY} in-flight/key | hard cap 15 starts/60s/key`);
+      console.log(`🚀 [Gemini AI] FAST v3.9.64: ${activeWorkerCount} worker | ${chunks.length} chunk | ${baseWorkerKeys.length} key | ${GEMINI_MAX_IN_FLIGHT_PER_KEY} in-flight/key | 22K/150 cue | overlap 6 | sample 2K | hard cap 15 starts/60s/key`);
 
       // Pull chunks from one shared queue. This avoids launching every chunk at
       // once and prevents a long subtitle from creating a huge Promise.all set.
@@ -2498,7 +2504,7 @@ ${sourceChunk}`;
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const isMovie = String(type || '').toLowerCase() === 'movie';
-    const expectedTime = isMovie ? '2 phút' : '1 phút';
+    const expectedTime = isMovie ? '45 giây' : '30 giây';
     const mediaLabel = isMovie ? 'phim lẻ' : 'phim bộ';
     const statusMessage =
       `🟡 Gemini AI đang dịch phụ đề...\n` +
