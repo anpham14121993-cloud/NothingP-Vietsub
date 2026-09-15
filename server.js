@@ -2498,7 +2498,7 @@ ${sourceChunk}`;
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const isMovie = String(type || '').toLowerCase() === 'movie';
-    const expectedTime = isMovie ? '2 phút' : '1 phút';
+    const expectedTime = isMovie ? '60s' : '30s';
     const mediaLabel = isMovie ? 'phim lẻ' : 'phim bộ';
     const statusMessage =
       `🟡 Gemini AI đang dịch phụ đề...\n` +
