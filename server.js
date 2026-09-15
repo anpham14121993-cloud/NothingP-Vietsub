@@ -2416,11 +2416,14 @@ ${sourceChunk}`;
       };
 
       const baseWorkerKeys = geminiKeys.slice(0, 3);
-      // v3.9.60: bounded chunk workers. Two active chunks per key is enough to
-      // keep all keys busy without flooding Node when a subtitle has many chunks.
+      // v3.9.64: use the full per-key in-flight capacity for chunk workers.
+      // Each key allows up to GEMINI_MAX_IN_FLIGHT_PER_KEY concurrent HTTP
+      // requests, so with 3 keys the scheduler can run up to 15 chunk workers.
+      // The request-start limiter (15 starts/60s/key) is still enforced inside
+      // withGeminiKeySlot(), so increasing workers does not bypass the hard cap.
       const activeWorkerCount = Math.min(
         chunks.length,
-        Math.max(1, baseWorkerKeys.length * 2)
+        Math.max(1, baseWorkerKeys.length * GEMINI_MAX_IN_FLIGHT_PER_KEY)
       );
 
       console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} worker | ${chunks.length} chunk | ${baseWorkerKeys.length} key | ${GEMINI_MAX_IN_FLIGHT_PER_KEY} in-flight/key | hard cap 15 starts/60s/key`);
@@ -2498,7 +2501,7 @@ ${sourceChunk}`;
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const isMovie = String(type || '').toLowerCase() === 'movie';
-    const expectedTime = isMovie ? '60s' : '30s';
+    const expectedTime = isMovie ? '60 giây' : '30 giây';
     const mediaLabel = isMovie ? 'phim lẻ' : 'phim bộ';
     const statusMessage =
       `🟡 Gemini AI đang dịch phụ đề...\n` +
