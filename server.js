@@ -1,4 +1,4 @@
-// NothingP AIOsubtitles v3.9.63 — 20K/120 + 5 in-flight/key + 15 RPM/key + fast timeout fallback
+// NothingP AIOsubtitles v3.9.64 — 20K/120 + 5 in-flight/key + 15 RPM/key + unlimited parallel scheduler + fast timeout fallback
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -79,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.63</h2>
+<h2>NothingP AIOsubtitles v3.9.64</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -1633,7 +1633,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.63',
+    'v3.9.64',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -2071,15 +2071,15 @@ app.get('/translate-sub', async (req, res) => {
       // Never write to res from the background task.
       // Worker-key pool is initialized later, immediately before the worker scheduler.
       // Do not reference baseWorkerKeys here because it is block-scoped and not initialized yet.
-      // v3.9.63: keep 20k/120-cue chunks to reduce large malformed Gemini outputs. All chunks may run concurrently and
-      // may share the same key; per-key in-flight=5 and the 15 request
-      // starts per rolling 60 seconds for each individual key.
+      // v3.9.64: keep 20k/120-cue chunks to reduce large malformed Gemini outputs.
+      // The scheduler runs up to 5 chunk tasks per key (15 total with 3 keys),
+      // while the limiter enforces 15 request starts per rolling 60 seconds/key.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
       console.log(`📦 [Gemini AI] Đang sử dụng cơ chế đa luồng dịch phụ đề | ETA hiển thị theo loại: ${String(type || '').toLowerCase() === 'movie' ? '2 phút' : '1 phút'}`);
 
-      // Three workers use the three independent Google projects to reduce wall-clock time
-      // themselves take longer than the 8s per-project request-start interval.
+      // Three independent Google projects are used in round-robin groups, with up to
+      // five in-flight chunk tasks assigned to each project/key.
       // The limiter in callAI() enforces the hard 15 request-starts/60s/key cap.
       // v3.9.48 CUE REPAIR: when Gemini drops only a few cues, do NOT
       // Detect failed source cues by their original timestamps, repair ONLY those
@@ -2416,24 +2416,34 @@ ${sourceChunk}`;
       };
 
       const baseWorkerKeys = geminiKeys.slice(0, 3);
-      // v3.9.60: bounded chunk workers. Two active chunks per key is enough to
-      // keep all keys busy without flooding Node when a subtitle has many chunks.
+      // v3.9.64: remove the old GLOBAL 6-worker cap.
+      // Launch exactly one scheduler worker for each available in-flight slot:
+      // 3 keys x 5 concurrent requests/key = up to 15 active chunk tasks.
+      // Each scheduler worker keeps its assigned key, so completed work on a key
+      // immediately pulls the next chunk for that same key.
+      // The per-key semaphore above is still the final safety boundary.
       const activeWorkerCount = Math.min(
         chunks.length,
-        Math.max(1, baseWorkerKeys.length * 2)
+        Math.max(1, baseWorkerKeys.length * GEMINI_MAX_INFLIGHT_PER_KEY)
       );
 
-      console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} worker | ${chunks.length} chunk | ${baseWorkerKeys.length} key | ${GEMINI_MAX_IN_FLIGHT_PER_KEY} in-flight/key | hard cap 15 starts/60s/key`);
+      console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} worker | ${chunks.length} chunk | ${baseWorkerKeys.length} key | tối đa ${GEMINI_MAX_INFLIGHT_PER_KEY} request đồng thời/key | tối đa ${baseWorkerKeys.length * GEMINI_MAX_INFLIGHT_PER_KEY} request đồng thời | hard cap ${GEMINI_MAX_REQUESTS_PER_MINUTE} starts/60s/key`);
 
-      // Pull chunks from one shared queue. This avoids launching every chunk at
-      // once and prevents a long subtitle from creating a huge Promise.all set.
+      // Shared chunk queue, but each worker keeps a fixed round-robin key.
+      // With 3 keys and 5 workers/key, the assignment is:
+      // worker 0/3/6/9/12 -> key 1,
+      // worker 1/4/7/10/13 -> key 2,
+      // worker 2/5/8/11/14 -> key 3.
+      // Therefore chunks are initially assigned round-robin K1 -> K2 -> K3,
+      // and every time a request finishes its key immediately receives another
+      // queued chunk without waiting for the other keys.
       let nextChunkIndex = 0;
       const chunkWorker = async workerIndex => {
+        const keyIndex = workerIndex % Math.max(1, baseWorkerKeys.length);
+        const workerKey = baseWorkerKeys[keyIndex];
         while (true) {
           const i = nextChunkIndex++;
           if (i >= chunks.length) return;
-          const keyIndex = workerIndex % Math.max(1, baseWorkerKeys.length);
-          const workerKey = baseWorkerKeys[keyIndex];
           await translateChunk(i, workerKey, keyIndex);
         }
       };
