@@ -525,7 +525,7 @@ const GEMINI_WINDOW_MS = 60000;
 // v3.9.60: hard cap the number of HTTP requests that can be in-flight on one
 // Gemini key. The old version only limited request STARTS, so a bad chunk could
 // launch dozens of repair requests at once and overload the Node/HTTP stack.
-const GEMINI_MAX_IN_FLIGHT_PER_KEY = 5;
+const GEMINI_MAX_IN_FLIGHT_PER_KEY = 8;
 // v3.9.63: do not let one stalled Gemini request hold a key slot for 60s.
 // Timeout is treated as transient and immediately rotates to the next key.
 const GEMINI_REQUEST_TIMEOUT_MS = 30000;
@@ -2416,11 +2416,14 @@ ${sourceChunk}`;
       };
 
       const baseWorkerKeys = geminiKeys.slice(0, 3);
-      // v3.9.60: bounded chunk workers. Two active chunks per key is enough to
-      // keep all keys busy without flooding Node when a subtitle has many chunks.
+      // v3.9.65: do not impose a separate worker-count ceiling.
+      // Every chunk gets a worker, while actual Gemini concurrency is still
+      // bounded per key by GEMINI_MAX_IN_FLIGHT_PER_KEY.
+      // The hard 15-starts/60s/key limiter remains enforced inside
+      // withGeminiKeySlot(), so workers cannot bypass the RPM cap.
       const activeWorkerCount = Math.min(
         chunks.length,
-        Math.max(1, baseWorkerKeys.length * 2)
+        Math.max(1, baseWorkerKeys.length * GEMINI_MAX_IN_FLIGHT_PER_KEY)
       );
 
       console.log(`🚀 [Gemini AI] Multi-request: ${activeWorkerCount} worker | ${chunks.length} chunk | ${baseWorkerKeys.length} key | ${GEMINI_MAX_IN_FLIGHT_PER_KEY} in-flight/key | hard cap 15 starts/60s/key`);
@@ -2529,3 +2532,4 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
 server.requestTimeout = 0;
+
