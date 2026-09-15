@@ -1,4 +1,4 @@
-// NothingP AIOsubtitles v3.9.59 — Compact 7-Layer Guide + 20K/150 + unlimited parallel per-key + 15 RPM/key
+// NothingP AIOsubtitles v3.9.61 — 20K/120 + 5 in-flight/key + 15 RPM/key + fast timeout fallback
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -79,7 +79,7 @@ button{width:100%;padding:12px;border:0;border-radius:5px;color:#fff;font-weight
 </head>
 <body>
 <div class="container">
-<h2>NothingP AIOsubtitles v3.9.59</h2>
+<h2>NothingP AIOsubtitles v3.9.61</h2>
 <form id="configForm">
 <label>Mô hình AI dịch ưu tiên:</label>
 <select id="modelSelect">
@@ -140,7 +140,7 @@ const configProviderRank = value => {
 
 const defaultManifest = {
   id: 'org.gemini.ai.subtitle.pro',
-  version: '3.9.56',
+  version: '3.9.61',
   name: 'NothingP AIOsubtitles',
   description: 'Tự động tìm sub Việt chuẩn hoặc dịch AI với sổ tay nhân vật, quan hệ và xưng hô theo bối cảnh.',
   types: ['movie', 'series'],
@@ -152,7 +152,7 @@ const defaultManifest = {
 };
 
 app.get('/healthz', (req, res) => {
-  res.status(200).json({ ok: true, version: '3.9.56', uptime: Math.round(process.uptime()) });
+  res.status(200).json({ ok: true, version: '3.9.61', uptime: Math.round(process.uptime()) });
 });
 
 app.get('/manifest.json', (req, res) => res.json(defaultManifest));
@@ -526,6 +526,9 @@ const GEMINI_WINDOW_MS = 60000;
 // Gemini key. The old version only limited request STARTS, so a bad chunk could
 // launch dozens of repair requests at once and overload the Node/HTTP stack.
 const GEMINI_MAX_IN_FLIGHT_PER_KEY = 5;
+// v3.9.61: do not let one stalled Gemini request hold a key slot for 60s.
+// Timeout is treated as transient and immediately rotates to the next key.
+const GEMINI_REQUEST_TIMEOUT_MS = 30000;
 const geminiKeyState = new Map();
 
 function getGeminiKeyState(key) {
@@ -585,7 +588,7 @@ async function withGeminiKeySlot(key, fn) {
   }
 }
 
-async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
+async function callAI(prompt, geminiKeys, model, startKeyIndex = 0, keyIndexMap = null) {
   let lastError = 'Lỗi không xác định';
   const keys = [...new Set((geminiKeys || []).filter(Boolean))];
 
@@ -613,7 +616,7 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
               ? { thinkingConfig: { thinkingLevel: 'low' } }
               : { temperature: 0.2 }
           }, {
-            timeout: 60000,
+            timeout: GEMINI_REQUEST_TIMEOUT_MS,
             headers: { 'Content-Type': 'application/json' }
           });
         });
@@ -624,7 +627,9 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           .trim();
 
         if (result) {
-          const actualKeyIndex = keyIndex;
+          const actualKeyIndex = Array.isArray(keyIndexMap) && Number.isInteger(keyIndexMap[keyIndex])
+            ? keyIndexMap[keyIndex]
+            : keyIndex;
           console.log(`[Gemini ${selectedModel} / key #${actualKeyIndex + 1}] success`);
           return { result, error: null, model: selectedModel, keyIndex: actualKeyIndex };
         }
@@ -639,7 +644,9 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
           `Gemini ${selectedModel}: lỗi không xác định`;
 
         lastError = message;
-        const actualKeyIndex = keyIndex;
+        const actualKeyIndex = Array.isArray(keyIndexMap) && Number.isInteger(keyIndexMap[keyIndex])
+          ? keyIndexMap[keyIndex]
+          : keyIndex;
         console.error(`[Gemini ${selectedModel} / key #${actualKeyIndex + 1}]`, message);
 
         if (
@@ -692,12 +699,12 @@ async function callAI(prompt, geminiKeys, model, startKeyIndex = 0) {
   };
 }
 
-async function callAIWithKey(prompt, key, model) {
+async function callAIWithKey(prompt, key, model, keyIndexMap = null) {
   if (!key) return { result: '', error: 'Thiếu Gemini API Key.' };
-  return callAI(prompt, [key], model, 0);
+  return callAI(prompt, [key], model, 0, keyIndexMap);
 }
 
-async function callAIWithModelFallback(prompt, geminiKeys, primaryModel, startKeyIndex = 0) {
+async function callAIWithModelFallback(prompt, geminiKeys, primaryModel, startKeyIndex = 0, keyIndexMap = null) {
   // Per-chunk fallback:
   // 1) Gemini 3.5 Flash-Lite is always tried first when it is the configured primary.
   // 2) If that request fails, the SAME chunk is retried with Gemini 2.5 Flash.
@@ -709,7 +716,7 @@ async function callAIWithModelFallback(prompt, geminiKeys, primaryModel, startKe
       ? 'gemini-2.5-flash'
       : 'gemini-3.5-flash-lite';
 
-  const primary = await callAI(prompt, geminiKeys, requested, startKeyIndex);
+  const primary = await callAI(prompt, geminiKeys, requested, startKeyIndex, keyIndexMap);
 
   if (primary?.result) {
     return {
@@ -732,7 +739,7 @@ async function callAIWithModelFallback(prompt, geminiKeys, primaryModel, startKe
     `[Gemini model fallback] ${requested} failed transiently; retrying SAME chunk with ${fallbackModel}`
   );
 
-  const fallback = await callAI(prompt, geminiKeys, fallbackModel, startKeyIndex);
+  const fallback = await callAI(prompt, geminiKeys, fallbackModel, startKeyIndex, keyIndexMap);
 
   if (fallback?.result) {
     return {
@@ -1504,7 +1511,8 @@ app.get('/ai-test-all', async (req, res) => {
     const r = await callAIWithKey(
       'Trả lời đúng một câu: Gemini worker hoạt động bình thường.',
       key,
-      requestedModel
+      requestedModel,
+      [index]
     );
     return {
       worker: index + 1,
@@ -1625,7 +1633,7 @@ function makeTranslationCacheKey({
   const normalizedModel = String(model || '').trim();
 
   return [
-    'v3.9.59',
+    'v3.9.61',
     logicalSource,
     normalizedModel,
     normalizedImdb,
@@ -2056,15 +2064,15 @@ app.get('/translate-sub', async (req, res) => {
   - Giữ tên, biệt danh, chức danh và đại từ nhất quán giữa tất cả các chunk.
   - Nếu lời thoại mới cung cấp bằng chứng rõ ràng hơn bảng, ưu tiên bằng chứng mới và vẫn giữ nhất quán về sau.`;
 
-      const chunks = splitSrtIntoChunks(originalSrt, 20000, 150);
+      const chunks = splitSrtIntoChunks(originalSrt, 20000, 120);
       const translated = [];
       statusState.total = chunks.length;
       // This translation runs in the background after Request #1 has returned.
       // Never write to res from the background task.
       const baseWorkerKeysForLog = geminiKeys.slice(0, 3);
-      const maxWorkerCountForLog = chunks.length;
-      // v3.9.59: keep 20k/150-cue chunks. All chunks may run concurrently and
-      // may share the same key; the ONLY Gemini scheduler limit is 15 request
+      const maxWorkerCountForLog = Math.min(chunks.length, baseWorkerKeys.length * 2);
+      // v3.9.61: keep 20k/120-cue chunks to reduce large malformed Gemini outputs. All chunks may run concurrently and
+      // may share the same key; per-key in-flight=5 and the 15 request
       // starts per rolling 60 seconds for each individual key.
       // The visible status message uses the requested simple movie/series estimate.
       statusState.etaSeconds = String(type || '').toLowerCase() === 'movie' ? 120 : 60;
@@ -2147,7 +2155,7 @@ app.get('/translate-sub', async (req, res) => {
         return text;
       };
 
-      const repairSingleCue = async (cue, label, orderedKeys, chunkIndex = -1) => {
+      const repairSingleCue = async (cue, label, orderedKeys, keyIndexMap = null, chunkIndex = -1) => {
         const repairPrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp.
 
 Dịch DUY NHẤT phần thoại của cue dưới đây sang tiếng Việt tự nhiên.
@@ -2163,7 +2171,7 @@ ${contextGuide}${chunkIndex >= 0 ? buildOverlapPrompt(chunkIndex) : ''}
 CUE CẦN REPAIR:
 ${cue.body}`;
 
-        const result = await callAIWithModelFallback(repairPrompt, orderedKeys, selectedModel, 0);
+        const result = await callAIWithModelFallback(repairPrompt, orderedKeys, selectedModel, 0, keyIndexMap);
         if (!result?.result) {
           throw new Error(`${label}: không có kết quả`);
         }
@@ -2184,7 +2192,7 @@ ${cue.body}`;
         return repairedCue;
       };
 
-      const mergeFailedCueRepairs = async (sourceChunk, translatedText, label, orderedKeys, chunkIndex = -1) => {
+      const mergeFailedCueRepairs = async (sourceChunk, translatedText, label, orderedKeys, keyIndexMap = null, chunkIndex = -1) => {
         const sourceCues = parseSrtCues(sourceChunk);
         const translatedCues = parseSrtCues(translatedText || '');
         if (!sourceCues.length || !translatedCues.length) return null;
@@ -2221,6 +2229,7 @@ ${cue.body}`;
                   cue,
                   `${label} cue ${index + 1}/${targets.length}${attempt > 1 ? ` retry ${attempt}` : ''}`,
                   orderedKeys,
+                  keyIndexMap,
                   chunkIndex
                 );
                 lastErr = null;
@@ -2304,7 +2313,7 @@ ${cue.body}`;
         return `\n\n[NGỮ CẢNH GỐI ĐẦU — CHUNK TRƯỚC]\nĐây là ${Math.min(OVERLAP_CONTEXT_CUES, parseSrtCues(chunks[chunkIndex - 1] || '').length)} cue cuối của chunk ngay trước. Chỉ dùng để hiểu mạch hội thoại, nhân vật, quan hệ và cách xưng hô. KHÔNG dịch lại, KHÔNG đưa các cue này vào kết quả.\n${overlap}\n[HẾT NGỮ CẢNH GỐI ĐẦU]`;
       };
 
-      const translateOneValidated = async (sourceChunk, label, orderedKeys, expectedCueCount, chunkIndex = -1) => {
+      const translateOneValidated = async (sourceChunk, label, orderedKeys, keyIndexMap, expectedCueCount, chunkIndex = -1) => {
         const basePrompt = `Bạn là dịch giả phụ đề phim chuyên nghiệp, chuyên Việt hóa lời thoại điện ảnh.
 
 MỤC TIÊU:
@@ -2331,7 +2340,7 @@ NGUYÊN TẮC XƯNG HÔ:
 SRT CẦN DỊCH:
 ${sourceChunk}`;
 
-        let last = await callAIWithModelFallback(basePrompt, orderedKeys, selectedModel, 0);
+        let last = await callAIWithModelFallback(basePrompt, orderedKeys, selectedModel, 0, keyIndexMap);
         if (last?.result) {
           let validation = validateCueStructure(sourceChunk, last.result, label);
           console.log(`[Gemini AI] Kiểm tra ${label}: nguồn=${expectedCueCount}, dịch=${validation.translatedCues.length}, timestamp=${validation.ok ? 'OK' : 'MISMATCH'}`);
@@ -2340,7 +2349,7 @@ ${sourceChunk}`;
           // v3.9.60: CHỈ repair những cue thực sự lỗi/thiếu.
           // Không retry lại toàn bộ chunk, dù có 1 hay nhiều cue lỗi.
           // Cue đã OK được giữ nguyên tuyệt đối.
-          const repaired = await mergeFailedCueRepairs(sourceChunk, last.result, label, orderedKeys, chunkIndex);
+          const repaired = await mergeFailedCueRepairs(sourceChunk, last.result, label, orderedKeys, keyIndexMap, chunkIndex);
           if (repaired && parseSrtCues(repaired).length === expectedCueCount) {
             return repaired.trim();
           }
@@ -2354,11 +2363,14 @@ ${sourceChunk}`;
         const expectedCueCount = parseSrtCues(sourceChunk).length;
         const primaryIndex = Math.max(0, Math.min(baseWorkerKeys.length - 1, Number(workerIndex) || 0));
         const orderedKeys = baseWorkerKeys.slice(primaryIndex).concat(baseWorkerKeys.slice(0, primaryIndex));
+        const keyIndexMap = orderedKeys.map((_, localIndex) =>
+          (primaryIndex + localIndex) % Math.max(1, baseWorkerKeys.length)
+        );
         const keyHint = `${String(workerKey).slice(0, 4)}…${String(workerKey).slice(-4)}`;
         console.log(`⏳ [Gemini AI] Đang dịch chunk ${i + 1}/${chunks.length} | ${expectedCueCount} cue | task-key-index=${primaryIndex + 1}/${baseWorkerKeys.length} | key #${primaryIndex + 1} | key=${keyHint}`);
 
         try {
-          const result = await translateOneValidated(sourceChunk, `chunk ${i + 1}/${chunks.length}`, orderedKeys, expectedCueCount, i);
+          const result = await translateOneValidated(sourceChunk, `chunk ${i + 1}/${chunks.length}`, orderedKeys, keyIndexMap, expectedCueCount, i);
           translated.push({ index: i, text: result });
           statusState.done = translated.length;
           console.log(`✅ [Gemini AI] Xong chunk ${i + 1}/${chunks.length} | ${((Date.now() - startedAt) / 1000).toFixed(1)}s | ${expectedCueCount} cue`);
